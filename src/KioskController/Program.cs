@@ -1,0 +1,43 @@
+using Serilog;
+using NpsShared.Configuration;
+
+namespace KioskController;
+
+static class Program
+{
+    [STAThread]
+    static void Main()
+    {
+        // Initialize logging
+        var logPath = Path.Combine(ConfigManager.GetLogDirectory(), "KioskController-.log");
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Information()
+            .WriteTo.File(logPath,
+                rollingInterval: RollingInterval.Day,
+                rollOnFileSizeLimit: true,
+                fileSizeLimitBytes: 10 * 1024 * 1024,
+                retainedFileCountLimit: 7,
+                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+            .CreateLogger();
+
+        // Opportunistic log cleanup (older than 30 days)
+        try { ConfigManager.CleanupOldLogs(30); } catch { }
+        Log.Information("=== KioskController Starting ===");
+
+        try
+        {
+            ApplicationConfiguration.Initialize();
+            Application.Run(new TrayApplicationContext());
+        }
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "Application crashed");
+        }
+        finally
+        {
+            Log.Information("=== KioskController Stopping ===");
+            Log.CloseAndFlush();
+        }
+    }
+}
+
