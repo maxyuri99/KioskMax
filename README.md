@@ -8,11 +8,13 @@ Repositório: https://github.com/maxyuri99/KioskMax
 
 - Display em tela cheia com WebView2 (Chromium)
 - Sempre visível (TopMost) e resiliência a falhas
-- Multi‑monitor: escolha por índice/ID ou primário
+- Multi‑monitor: padrão primário; escolha por índice/ID ou primário
 - Controlador na bandeja (tray) para iniciar/parar, trocar URL, monitor, recarregar
 - Roteador de janelas opcional (evita que outras janelas invadam o monitor do NPS)
 - Watchdog opcional (serviço) para reinício automático
 - Logs rotativos e configuração persistida em `%ProgramData%`
+- Atalhos globais: Ctrl+Alt+K/H para abrir o Controller
+- Display oculto na barra de tarefas
 
 ## Componentes
 
@@ -88,7 +90,7 @@ Exemplo (padrão):
 ```json
 {
   "npsUrl": "https://seu-endereco/nps",
-  "monitorPolicy": "Explicit",
+  "monitorPolicy": "Primary",
   "monitorDeviceId": "",
   "monitorIndex": 0,
   "topMost": true,
@@ -101,6 +103,9 @@ Exemplo (padrão):
 }
 ```
 
+Observações:
+- Se você escolher um monitor manualmente pelo Controller, a política muda para "Explicit" automaticamente e persiste.
+
 ## Operação
 
 - Use o ícone da bandeja (KioskMax) para:
@@ -108,12 +113,17 @@ Exemplo (padrão):
   - Alterar URL, Monitor, Recarregar
   - Abrir pastas de Config e Logs
   - Ativar/Desativar o WindowRouter
+  - Usar "Use Primary (Auto)" para alternar o uso do monitor primário
+
+- Atalhos globais:
+  - Ctrl+Alt+K ou Ctrl+Alt+H: abre o Controller (mesmo com o Display em foco)
 
 ## Solução de problemas
 
 - Display não abre: verifique WebView2 Runtime e logs em `%ProgramData%\\UpMais\\NpsKiosk\\logs`
 - Monitor incorreto: troque pelo menu da bandeja ou edite `monitorIndex` no `config.json`
 - Janelas sobrepondo: habilite `topMost` e/ou WindowRouter
+- Ícone da bandeja inacessível (Display cobre o monitor): use Ctrl+Alt+K/H para abrir o Controller
 
 ## Licença
 

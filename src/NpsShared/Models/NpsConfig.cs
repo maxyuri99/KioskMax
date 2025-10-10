@@ -6,7 +6,7 @@ namespace NpsShared.Models;
 public class NpsConfig
 {
     public string NpsUrl { get; set; } = "https://nps-caixas-frente-caixa-teste.6yhsxt.easypanel.host/";
-    public string MonitorPolicy { get; set; } = "Explicit"; // "Explicit" or "Primary"
+    public string MonitorPolicy { get; set; } = "Primary"; // "Explicit" or "Primary"
     public string MonitorDeviceId { get; set; } = string.Empty;
     public int MonitorIndex { get; set; } = 0;
     public bool TopMost { get; set; } = true;

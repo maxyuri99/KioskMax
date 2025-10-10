@@ -5,6 +5,7 @@ using NpsShared.Configuration;
 using NpsShared.IPC;
 using NpsShared.Models;
 using Serilog;
+using System.Diagnostics;
 
 namespace NpsDisplay;
 
@@ -16,6 +17,8 @@ public partial class MainForm : Form
     private System.Windows.Forms.Timer _resilienceTimer;
     private Screen _targetScreen;
     private bool _isInitialized;
+    private int _secretClickCount;
+    private DateTime _secretClickWindowStart;
 
     public MainForm()
     {
@@ -37,6 +40,7 @@ public partial class MainForm : Form
         this.FormBorderStyle = FormBorderStyle.None;
         this.WindowState = FormWindowState.Normal; // Set to normal first
         this.TopMost = _config.TopMost;
+        this.ShowInTaskbar = false;
         
         // Determine target screen
         _targetScreen = DetermineTargetScreen();
@@ -103,6 +107,8 @@ public partial class MainForm : Form
             _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
             _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
+
+            // (Secret click removed per user request)
 
             // Recover automatically if the WebView2 process crashes
             _webView.CoreWebView2.ProcessFailed += (s, e) =>
@@ -385,5 +391,133 @@ public partial class MainForm : Form
         }
         base.OnKeyDown(e);
     }
+
+    private void TryShowController()
+    {
+        try
+        {
+            if (TryBringExistingControllerToFront())
+                return;
+
+            // Start Controller if not running
+            var exePath = ResolveSiblingExecutablePath("KioskController.exe");
+            if (!File.Exists(exePath))
+            {
+                Log.Warning("KioskController.exe not found at: {Path}", exePath);
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = exePath,
+                UseShellExecute = false
+            });
+
+            // Give it a moment and attempt to bring to front
+            Task.Delay(800).ContinueWith(_ => TryBringExistingControllerToFront());
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to show controller");
+        }
+    }
+
+    private bool TryBringExistingControllerToFront()
+    {
+        try
+        {
+            // Try by window title first
+            var hWnd = FindWindow(null, "KioskMax - Controller");
+            if (hWnd != IntPtr.Zero)
+            {
+                ShowWindow(hWnd, 9); // SW_RESTORE
+                SetForegroundWindow(hWnd);
+                return true;
+            }
+
+            // Fallback: search process by name and try main window
+            foreach (var p in Process.GetProcessesByName("KioskController"))
+            {
+                try
+                {
+                    if (p.MainWindowHandle != IntPtr.Zero)
+                    {
+                        ShowWindow(p.MainWindowHandle, 9);
+                        SetForegroundWindow(p.MainWindowHandle);
+                        return true;
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private string ResolveSiblingExecutablePath(string fileName)
+    {
+        var runtimeBase = AppDomain.CurrentDomain.BaseDirectory;
+        var exePath = Process.GetCurrentProcess().MainModule?.FileName ?? runtimeBase;
+        var exeDir = Path.GetDirectoryName(exePath) ?? runtimeBase;
+
+        var sameDir = Path.Combine(exeDir, fileName);
+        if (File.Exists(sameDir)) return sameDir;
+
+        var rootsToSearch = new List<string>();
+        void AddAncestors(string start)
+        {
+            try
+            {
+                var current = new DirectoryInfo(start);
+                for (int i = 0; i < 8 && current != null; i++)
+                {
+                    rootsToSearch.Add(current.FullName);
+                    current = current.Parent;
+                }
+            }
+            catch { }
+        }
+        AddAncestors(exeDir);
+        AddAncestors(runtimeBase);
+
+        foreach (var root in rootsToSearch.Distinct())
+        {
+            var s1 = Path.Combine(root, fileName);
+            if (File.Exists(s1)) return s1;
+            var s2 = Path.Combine(root, "KioskController", fileName);
+            if (File.Exists(s2)) return s2;
+            var d1 = Path.Combine(root, "KioskController", "bin", "Debug", "net8.0-windows", fileName);
+            if (File.Exists(d1)) return d1;
+            var d2 = Path.Combine(root, "src", "KioskController", "bin", "Debug", "net8.0-windows", fileName);
+            if (File.Exists(d2)) return d2;
+            var p1 = Path.Combine(root, "build", "publish", "KioskController", fileName);
+            if (File.Exists(p1)) return p1;
+            var p2 = Path.Combine(root, "temp-run", "KioskController", fileName);
+            if (File.Exists(p2)) return p2;
+        }
+
+        foreach (var root in rootsToSearch.Distinct())
+        {
+            try
+            {
+                var found = Directory.EnumerateFiles(root, fileName, SearchOption.AllDirectories)
+                    .OrderByDescending(p => p.Contains("net8.0-windows"))
+                    .FirstOrDefault();
+                if (!string.IsNullOrEmpty(found)) return found!;
+            }
+            catch { }
+        }
+
+        return sameDir;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 }
 

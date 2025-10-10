@@ -251,6 +251,7 @@ public partial class ControllerForm : Form
                 }
                 else
                 {
+                    _config.MonitorPolicy = "Explicit";
                     _config.MonitorIndex = index;
                     ConfigManager.SaveConfig(_config);
                 }
@@ -258,6 +259,7 @@ public partial class ControllerForm : Form
             else
             {
                 // Persist locally for próxima inicialização do Display
+                _config.MonitorPolicy = "Explicit";
                 _config.MonitorIndex = index;
                 ConfigManager.SaveConfig(_config);
                 await UpdateStatusAsync();

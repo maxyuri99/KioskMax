@@ -1,6 +1,6 @@
 {
   "npsUrl": "https://nps-caixas-frente-caixa-teste.6yhsxt.easypanel.host",
-  "monitorPolicy": "Explicit",
+  "monitorPolicy": "Primary",
   "monitorDeviceId": "",
   "monitorIndex": 0,
   "topMost": true,
