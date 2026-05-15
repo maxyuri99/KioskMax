@@ -15,6 +15,23 @@ public class NpsConfig
     public string DpiMode { get; set; } = "PerMonitorV2";
     public bool RouterEnabled { get; set; } = true;
     public string RouterTarget { get; set; } = "Opposite"; // "Opposite" or explicit index
+    /// <summary>
+    /// Strict: legacy filters (skip WS_EX_TOOLWINDOW and caption-less popups).
+    /// Relaxed: route those windows too if they visibly intersect the kiosk monitor (helps PDV/TEF popups).
+    /// </summary>
+    public string RouterWindowFilterMode { get; set; } = "Strict";
+    /// <summary>
+    /// Minimum area in pixels (of the rectangle intersecting the kiosk monitor) required to consider routing.
+    /// </summary>
+    public int RouterMinVisibleArea { get; set; } = 400;
+    /// <summary>
+    /// When true, log windows that intersect the kiosk monitor but were not routed (and SetWindowPos failures).
+    /// </summary>
+    public bool RouterDebugLogging { get; set; }
+    /// <summary>When true, Ctrl+Alt+RouterPauseHotKeyVk toggles pause (WindowRouter process).</summary>
+    public bool RouterPauseHotKeyEnabled { get; set; } = true;
+    /// <summary>Win32 virtual key (1–254). Default 0x50 = 'P'. Example: 0x31 = '1'.</summary>
+    public int RouterPauseHotKeyVk { get; set; } = 0x50;
     public string LogLevel { get; set; } = "Information";
 }
 

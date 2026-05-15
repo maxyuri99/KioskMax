@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using NpsShared.Configuration;
 using NpsShared.Models;
 using Serilog;
 
@@ -16,7 +17,7 @@ public class WindowHookManager : IDisposable
     private const uint EVENT_OBJECT_CREATE = 0x8000;
     private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
 
-    private readonly NpsConfig _config;
+    private NpsConfig _config;
     private Screen _npsMonitor;
     private Screen _targetMonitor;
     private IntPtr _foregroundHook;
@@ -28,32 +29,12 @@ public class WindowHookManager : IDisposable
     private System.Windows.Forms.Timer? _scanTimer;
     private readonly HashSet<string> _exemptProcessNames;
 
+    /// <summary>When true, hooks keep running but windows are not moved.</summary>
+    public bool RoutingPaused { get; set; }
+
     public WindowHookManager(NpsConfig config)
     {
         _config = config;
-        
-        // Determine monitors consistent with Display selection logic
-        var screens = Screen.AllScreens;
-
-        // Choose the NPS monitor according to MonitorPolicy/DeviceId/Index
-        if (_config.MonitorPolicy == "Primary")
-        {
-            _npsMonitor = Screen.PrimaryScreen ?? screens[0];
-        }
-        else
-        {
-            // Explicit policy
-            Screen? chosen = null;
-            if (!string.IsNullOrEmpty(_config.MonitorDeviceId))
-            {
-                chosen = screens.FirstOrDefault(s => 
-                    s.DeviceName.Equals(_config.MonitorDeviceId, StringComparison.OrdinalIgnoreCase));
-            }
-            _npsMonitor = chosen ?? screens[Math.Min(_config.MonitorIndex, screens.Length - 1)];
-        }
-
-        // Choose target monitor (initial)
-        _targetMonitor = ChooseTargetMonitor(screens, _npsMonitor);
 
         // Exempt processes that should not be moved
         _exemptProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -61,16 +42,23 @@ public class WindowHookManager : IDisposable
             "KioskBrowser",
             "NpsDisplay", // legacy
             "WindowRouter",
-            "explorer",
             "taskmgr",
             "ApplicationFrameHost" // UWP host
         };
 
-        // Try to align NPS monitor to where NpsDisplay actually is (if running)
-        UpdateMonitorsFromDisplayIfAvailable();
+        var screens = Screen.AllScreens;
+        _npsMonitor = Screen.PrimaryScreen ?? (screens.Length > 0 ? screens[0] : throw new InvalidOperationException("No screens"));
+        _targetMonitor = _npsMonitor;
 
-        Log.Information("Window Router: Kiosk Monitor = {NPS}, Target Monitor = {Target}",
-            _npsMonitor.DeviceName, _targetMonitor.DeviceName);
+        // Fresh config file + kiosk browser HWND + RouterTarget Opposite/etc.
+        SynchronizeRoutingLayout();
+
+        Log.Information(
+            "Window Router: Kiosk Monitor = {NPS}, Target Monitor = {Target}, FilterMode = {Mode}, MinVisibleArea = {MinArea}, DebugLogging = {Debug}",
+            _npsMonitor.DeviceName, _targetMonitor.DeviceName,
+            IsRelaxedMode() ? "Relaxed" : "Strict",
+            EffectiveMinVisibleArea(),
+            _config.RouterDebugLogging);
     }
 
     public void Start()
@@ -104,7 +92,7 @@ public class WindowHookManager : IDisposable
 
         // Periodic scan to catch missed windows
         _scanTimer = new System.Windows.Forms.Timer { Interval = 1500 };
-        _scanTimer.Tick += (s, e) => SafeScanAndRoute();
+        _scanTimer.Tick += (_, _) => SafeScanAndRoute();
         _scanTimer.Start();
 
         Log.Information("Window event hooks installed and scan timer started");
@@ -140,7 +128,7 @@ public class WindowHookManager : IDisposable
         Log.Information("Window event hooks removed");
     }
 
-    private void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, 
+    private void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
         // Only handle window events (not child objects)
@@ -152,10 +140,18 @@ public class WindowHookManager : IDisposable
 
         try
         {
-            // Check if window should be routed
-            if (ShouldRouteWindow(hwnd))
+            RefreshLayoutFromRunningBrowserOnly();
+
+            if (RoutingPaused)
+                return;
+
+            if (ShouldRouteWindow(hwnd, out var skipReason))
             {
                 RouteWindowToTargetMonitor(hwnd);
+            }
+            else if (!string.IsNullOrEmpty(skipReason))
+            {
+                LogSkippedCandidate(hwnd, skipReason);
             }
         }
         catch (Exception ex)
@@ -168,16 +164,22 @@ public class WindowHookManager : IDisposable
     {
         try
         {
-            // Periodically refresh monitors in case Display moved
-            UpdateMonitorsFromDisplayIfAvailable();
+            SynchronizeRoutingLayout();
 
-            EnumWindows((hWnd, lParam) =>
+            if (RoutingPaused)
+                return;
+
+            EnumWindows((hWnd, _) =>
             {
                 try
                 {
-                    if (ShouldRouteWindow(hWnd))
+                    if (ShouldRouteWindow(hWnd, out var skipReason))
                     {
                         RouteWindowToTargetMonitor(hWnd);
+                    }
+                    else if (!string.IsNullOrEmpty(skipReason))
+                    {
+                        LogSkippedCandidate(hWnd, skipReason);
                     }
                 }
                 catch (Exception ex)
@@ -193,56 +195,155 @@ public class WindowHookManager : IDisposable
         }
     }
 
-    private bool ShouldRouteWindow(IntPtr hwnd)
+    private bool IsRelaxedMode() =>
+        string.Equals(_config.RouterWindowFilterMode, "Relaxed", StringComparison.OrdinalIgnoreCase);
+
+    private int EffectiveMinVisibleArea()
     {
-        // Must be visible
+        var v = _config.RouterMinVisibleArea;
+        return v < 1 ? 400 : v;
+    }
+
+    private static Rectangle RectToRectangle(RECT r) =>
+        Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+
+    private bool TryGetKioskIntersectionArea(RECT windowRect, out int intersectionArea)
+    {
+        intersectionArea = 0;
+        var win = RectToRectangle(windowRect);
+        var inter = Rectangle.Intersect(win, _npsMonitor.Bounds);
+        if (inter.Width <= 0 || inter.Height <= 0)
+            return false;
+
+        intersectionArea = inter.Width * inter.Height;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether to route this HWND. When debug logging is enabled and the window visibly intersects the kiosk monitor
+    /// but is skipped, <paramref name="skipReason"/> describes why (for diagnostics only).
+    /// </summary>
+    private bool ShouldRouteWindow(IntPtr hwnd, out string? skipReason)
+    {
+        skipReason = null;
+
         if (!IsWindowVisible(hwnd))
             return false;
 
-        // Get window style
-        var style = GetWindowLong(hwnd, GWL_STYLE);
-        var exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-
-        // Ignore tool windows, popup windows without caption
-        if ((exStyle & WS_EX_TOOLWINDOW) != 0)
+        var rect = new RECT();
+        if (!GetWindowRect(hwnd, ref rect))
             return false;
 
-        if ((style & WS_CAPTION) == 0 && (exStyle & WS_EX_APPWINDOW) == 0)
+        if (!TryGetKioskIntersectionArea(rect, out var intersectArea))
             return false;
 
-        // Get process name
+        if (intersectArea < EffectiveMinVisibleArea())
+        {
+            if (_config.RouterDebugLogging)
+                skipReason = $"below_min_visible_area (intersect={intersectArea}, min={EffectiveMinVisibleArea()})";
+            return false;
+        }
+
+        uint style = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_STYLE).ToInt64());
+        uint exStyle = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_EXSTYLE).ToInt64());
+
+        if (!IsRelaxedMode())
+        {
+            if ((exStyle & WS_EX_TOOLWINDOW) != 0)
+            {
+                if (_config.RouterDebugLogging)
+                    skipReason = "strict_filter_ws_ex_toolwindow";
+                return false;
+            }
+
+            if ((style & WS_CAPTION) == 0 && (exStyle & WS_EX_APPWINDOW) == 0)
+            {
+                if (_config.RouterDebugLogging)
+                    skipReason = "strict_filter_no_caption_and_no_ws_ex_appwindow";
+                return false;
+            }
+        }
+
         try
         {
             GetWindowThreadProcessId(hwnd, out uint processId);
             using var process = Process.GetProcessById((int)processId);
             var processName = process.ProcessName;
 
-            // Check exemptions
             if (_exemptProcessNames.Contains(processName))
             {
+                if (_config.RouterDebugLogging)
+                    skipReason = $"exempt_process:{processName}";
                 return false;
             }
 
-            // Check if window is on NPS monitor
-            var rect = new RECT();
-            if (GetWindowRect(hwnd, ref rect))
+            // explorer.exe hosts desktop/taskbar and folder windows — only skip shell chrome, route File Explorer (CabinetWClass, etc.).
+            if (string.Equals(processName, "explorer", StringComparison.OrdinalIgnoreCase))
             {
-                var windowCenter = new Point(
-                    (rect.Left + rect.Right) / 2,
-                    (rect.Top + rect.Bottom) / 2);
-
-                var currentScreen = Screen.FromPoint(windowCenter);
-                
-                // Only route if on NPS monitor
-                return currentScreen.DeviceName == _npsMonitor.DeviceName;
+                var cls = GetWindowClassName(hwnd);
+                if (IsExplorerShellChromeWindowClass(cls))
+                {
+                    if (_config.RouterDebugLogging)
+                        skipReason = $"exempt_explorer_shell:{cls}";
+                    return false;
+                }
             }
+
+            skipReason = null;
+            return true;
         }
         catch (Exception ex)
         {
             Log.Debug(ex, "Could not determine if window should be routed");
+            return false;
         }
+    }
 
-        return false;
+    private static IntPtr GetWindowStylePtr(IntPtr hwnd, int nIndex)
+    {
+        if (nint.Size == 8)
+            return GetWindowLongPtrW(hwnd, nIndex);
+
+        return new IntPtr(GetWindowLongW(hwnd, nIndex));
+    }
+
+    private void LogSkippedCandidate(IntPtr hwnd, string reason)
+    {
+        if (!_config.RouterDebugLogging)
+            return;
+
+        try
+        {
+            var cls = GetWindowClassName(hwnd);
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            string procName = "?";
+            try
+            {
+                using var p = Process.GetProcessById((int)pid);
+                procName = p.ProcessName;
+            }
+            catch { /* ignore */ }
+
+            var rect = new RECT();
+            GetWindowRect(hwnd, ref rect);
+            uint style = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_STYLE).ToInt64());
+            uint exStyle = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_EXSTYLE).ToInt64());
+
+            Log.Information(
+                "WindowRouter skipped ({Reason}): HWND=0x{Hwnd:X} Class={Class} Process={Process} Style=0x{Style:X} ExStyle=0x{ExStyle:X} Rect={Left},{Top}-{Right},{Bottom}",
+                reason, hwnd.ToInt64(), cls, procName, style, exStyle,
+                rect.Left, rect.Top, rect.Right, rect.Bottom);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Failed to log skipped router candidate");
+        }
+    }
+
+    private static string GetWindowClassName(IntPtr hwnd)
+    {
+        var sb = new StringBuilder(256);
+        return GetClassNameW(hwnd, sb, sb.Capacity) == 0 ? "" : sb.ToString();
     }
 
     private void RouteWindowToTargetMonitor(IntPtr hwnd)
@@ -260,16 +361,29 @@ public class WindowHookManager : IDisposable
             var newX = _targetMonitor.Bounds.Left + (_targetMonitor.Bounds.Width - width) / 2;
             var newY = _targetMonitor.Bounds.Top + (_targetMonitor.Bounds.Height - height) / 2;
 
-            // Preserve maximized state: restore, move, then re-maximize if needed
             var wasMaximized = IsZoomed(hwnd);
+
+            // Avoid restore/move/maximize loops that cause fullscreen/maximized windows to flicker when already on the target monitor.
+            if (IsWindowAlreadyPlacedOnTarget(hwnd, rect, width, height, newX, newY, wasMaximized))
+                return;
+
+            // Preserve maximized state: restore, move, then re-maximize if needed
             if (wasMaximized)
             {
                 ShowWindow(hwnd, SW_RESTORE);
             }
 
             // Move window without changing Z-order or activation
-            SetWindowPos(hwnd, IntPtr.Zero, newX, newY, width, height,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            if (!SetWindowPos(hwnd, IntPtr.Zero, newX, newY, width, height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE))
+            {
+                if (_config.RouterDebugLogging)
+                {
+                    var err = Marshal.GetLastWin32Error();
+                    LogSkippedCandidate(hwnd, $"setwindowpos_failed win32={err}");
+                }
+                return;
+            }
 
             if (wasMaximized)
             {
@@ -286,11 +400,198 @@ public class WindowHookManager : IDisposable
         }
     }
 
+    /// <summary>Desktop/taskbar/shell windows hosted by explorer.exe — not folder/File Explorer.</summary>
+    private static bool IsExplorerShellChromeWindowClass(string className) =>
+        string.Equals(className, "Progman", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(className, "WorkerW", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(className, "Shell_TrayWnd", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(className, "Shell_SecondaryTrayWnd", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(className, "TrayNotifyWnd", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsWindowAlreadyPlacedOnTarget(IntPtr hwnd, RECT rect, int width, int height, int newX, int newY, bool wasMaximized)
+    {
+        const int tol = 12;
+
+        if (wasMaximized)
+        {
+            var hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            return hMon != IntPtr.Zero && MonitorDeviceNameEqualsScreen(hMon, _targetMonitor);
+        }
+
+        // Restored / normal windows: skip if we'd move to the same position (within tolerance).
+        if (Math.Abs(rect.Left - newX) <= tol && Math.Abs(rect.Top - newY) <= tol)
+            return true;
+
+        // Borderless fullscreen (often not "zoomed"): bounds match target monitor.
+        if (RectMatchesScreenBounds(rect, _targetMonitor.Bounds, tol))
+            return true;
+
+        return false;
+    }
+
+    private static bool RectMatchesScreenBounds(RECT r, Rectangle bounds, int tol)
+    {
+        var rw = r.Right - r.Left;
+        var rh = r.Bottom - r.Top;
+        return Math.Abs(r.Left - bounds.Left) <= tol
+               && Math.Abs(r.Top - bounds.Top) <= tol
+               && Math.Abs(rw - bounds.Width) <= tol
+               && Math.Abs(rh - bounds.Height) <= tol;
+    }
+
+    private static bool MonitorDeviceNameEqualsScreen(IntPtr hMonitor, Screen screen)
+    {
+        var mi = new MONITORINFOEX();
+        mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+        if (!GetMonitorInfo(hMonitor, ref mi))
+            return false;
+
+        return string.Equals(mi.szDevice, screen.DeviceName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private Screen ResolveKioskMonitorFromConfig(Screen[] screens)
+    {
+        if (screens.Length == 0)
+            throw new InvalidOperationException("No screens");
+
+        if (_config.MonitorPolicy == "Primary")
+        {
+            return Screen.PrimaryScreen ?? screens[0];
+        }
+
+        if (!string.IsNullOrEmpty(_config.MonitorDeviceId))
+        {
+            var byDevice = screens.FirstOrDefault(s =>
+                s.DeviceName.Equals(_config.MonitorDeviceId, StringComparison.OrdinalIgnoreCase));
+            if (byDevice != null)
+                return byDevice;
+        }
+
+        if (_config.MonitorIndex >= 0 && _config.MonitorIndex < screens.Length)
+        {
+            return screens[_config.MonitorIndex];
+        }
+
+        return Screen.PrimaryScreen ?? screens[0];
+    }
+
+    private bool TryResolveKioskScreenFromBrowser(out Screen screen)
+    {
+        screen = null!;
+
+        try
+        {
+            foreach (var processName in new[] { "KioskBrowser", "NpsDisplay" })
+            {
+                foreach (var p in Process.GetProcessesByName(processName))
+                {
+                    try
+                    {
+                        p.Refresh();
+                        var hWnd = p.MainWindowHandle;
+                        if (hWnd == IntPtr.Zero || !IsWindowVisible(hWnd))
+                            continue;
+
+                        var rect = new RECT();
+                        if (!GetWindowRect(hWnd, ref rect))
+                            continue;
+
+                        var center = new Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
+                        screen = Screen.FromPoint(center);
+                        return true;
+                    }
+                    finally
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    /// <summary>Reloads disk config and recomputes kiosk + target monitors (timer path).</summary>
+    private void SynchronizeRoutingLayout()
+    {
+        try
+        {
+            _config = ConfigManager.LoadConfig();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Window Router failed to reload config; using previous snapshot");
+            return;
+        }
+
+        var screens = Screen.AllScreens;
+        if (screens.Length == 0)
+            return;
+
+        var kioskFromConfig = ResolveKioskMonitorFromConfig(screens);
+        var effectiveKiosk = kioskFromConfig;
+        if (TryResolveKioskScreenFromBrowser(out var fromBrowser))
+        {
+            effectiveKiosk = fromBrowser;
+        }
+
+        var newTarget = ChooseTargetMonitor(screens, effectiveKiosk);
+
+        var npsChanged = !string.Equals(_npsMonitor.DeviceName, effectiveKiosk.DeviceName, StringComparison.OrdinalIgnoreCase);
+        var tgtChanged = !string.Equals(_targetMonitor.DeviceName, newTarget.DeviceName, StringComparison.OrdinalIgnoreCase);
+
+        _npsMonitor = effectiveKiosk;
+        _targetMonitor = newTarget;
+
+        if (npsChanged || tgtChanged)
+        {
+            Log.Information(
+                "Window Router layout synced — kiosk={Kiosk}, target={Target}, RouterTarget={Rt}",
+                _npsMonitor.DeviceName,
+                _targetMonitor.DeviceName,
+                _config.RouterTarget);
+        }
+    }
+
+    /// <summary>Often enough for WinEvents: browser moved without needing a disk read.</summary>
+    private void RefreshLayoutFromRunningBrowserOnly()
+    {
+        try
+        {
+            var screens = Screen.AllScreens;
+            if (screens.Length == 0)
+                return;
+
+            if (!TryResolveKioskScreenFromBrowser(out var fromBrowser))
+                return;
+
+            if (string.Equals(_npsMonitor.DeviceName, fromBrowser.DeviceName, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _npsMonitor = fromBrowser;
+            _targetMonitor = ChooseTargetMonitor(screens, _npsMonitor);
+            Log.Information(
+                "Window Router: kiosk monitor updated from browser HWND -> {Nps}; target={Target}",
+                _npsMonitor.DeviceName,
+                _targetMonitor.DeviceName);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Browser-only layout refresh failed");
+        }
+    }
+
     private Screen ChooseTargetMonitor(Screen[] screens, Screen npsMonitor)
     {
         if (_config.RouterTarget == "Opposite")
         {
-            return screens.FirstOrDefault(s => s != npsMonitor) ?? npsMonitor;
+            return screens.FirstOrDefault(s =>
+                       !string.Equals(s.DeviceName, npsMonitor.DeviceName, StringComparison.OrdinalIgnoreCase))
+                   ?? npsMonitor;
         }
 
         if (int.TryParse(_config.RouterTarget, out var targetIndex) && targetIndex >= 0 && targetIndex < screens.Length)
@@ -298,46 +599,13 @@ public class WindowHookManager : IDisposable
             return screens[targetIndex];
         }
 
-        return screens.FirstOrDefault(s => s != npsMonitor) ?? npsMonitor;
-    }
-
-    private void UpdateMonitorsFromDisplayIfAvailable()
-    {
-        try
-        {
-            var displayProc = Process.GetProcessesByName("KioskBrowser").FirstOrDefault() ??
-                               Process.GetProcessesByName("NpsDisplay").FirstOrDefault();
-            if (displayProc == null)
-                return;
-
-            var hWnd = displayProc.MainWindowHandle;
-            if (hWnd == IntPtr.Zero)
-                return;
-
-            var rect = new RECT();
-            if (!GetWindowRect(hWnd, ref rect))
-                return;
-
-            var center = new Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
-            var screens = Screen.AllScreens;
-            var actualNpsMonitor = Screen.FromPoint(center);
-
-            if (!string.Equals(actualNpsMonitor.DeviceName, _npsMonitor.DeviceName, StringComparison.OrdinalIgnoreCase))
-            {
-                _npsMonitor = actualNpsMonitor;
-                _targetMonitor = ChooseTargetMonitor(screens, _npsMonitor);
-                Log.Information("Window Router: Detected Browser on {NPS}; updated Target to {Target}",
-                    _npsMonitor.DeviceName, _targetMonitor.DeviceName);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Debug(ex, "Failed to update monitors from Display process");
-        }
+        return screens.FirstOrDefault(s =>
+                   !string.Equals(s.DeviceName, npsMonitor.DeviceName, StringComparison.OrdinalIgnoreCase))
+               ?? npsMonitor;
     }
 
     // Windows API declarations
-    private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, 
+    private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -352,8 +620,11 @@ public class WindowHookManager : IDisposable
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
-    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLongW(IntPtr hWnd, int nIndex);
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -361,8 +632,8 @@ public class WindowHookManager : IDisposable
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, ref RECT lpRect);
 
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y,
         int cx, int cy, uint uFlags);
 
     [DllImport("user32.dll")]
@@ -372,7 +643,16 @@ public class WindowHookManager : IDisposable
     private static extern bool IsZoomed(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
+
+    [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
@@ -383,9 +663,8 @@ public class WindowHookManager : IDisposable
         public int Bottom;
     }
 
-    // Constants
-    private const int GWL_STYLE = -16;
-    private const int GWL_EXSTYLE = -20;
+    private const int GWLP_STYLE = -16;
+    private const int GWLP_EXSTYLE = -20;
     private const uint WS_CAPTION = 0x00C00000;
     private const uint WS_EX_TOOLWINDOW = 0x00000080;
     private const uint WS_EX_APPWINDOW = 0x00040000;
@@ -394,10 +673,21 @@ public class WindowHookManager : IDisposable
     private const uint SWP_NOSIZE = 0x0001;
     private const int SW_RESTORE = 9;
     private const int SW_MAXIMIZE = 3;
+    private const uint MONITOR_DEFAULTTONEAREST = 2;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MONITORINFOEX
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szDevice;
+    }
 
     public void Dispose()
     {
         Stop();
     }
 }
-

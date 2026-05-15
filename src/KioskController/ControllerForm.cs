@@ -28,6 +28,16 @@ public partial class ControllerForm : Form
         txtUrl.Text = _config.NpsUrl;
         chkRouter.Checked = _config.RouterEnabled;
 
+        cmbRouterFilter.Items.AddRange(new object[] { "Strict", "Relaxed" });
+        var filterMode = string.Equals(_config.RouterWindowFilterMode, "Relaxed", StringComparison.OrdinalIgnoreCase)
+            ? "Relaxed"
+            : "Strict";
+        cmbRouterFilter.SelectedItem = filterMode;
+        cmbRouterFilter.SelectedIndexChanged += cmbRouterFilter_SelectedIndexChanged;
+
+        chkRouterDebugLogging.Checked = _config.RouterDebugLogging;
+        chkRouterDebugLogging.CheckedChanged += chkRouterDebugLogging_CheckedChanged;
+
         PopulateMonitors();
 
         _statusTimer = new System.Windows.Forms.Timer
@@ -50,33 +60,26 @@ public partial class ControllerForm : Form
             var routerRunning = false;
             try { routerRunning = Process.GetProcessesByName("WindowRouter").Length > 0; } catch { }
 
-            if (displayRunning || routerRunning)
-            {
-                var result = MessageBox.Show(
-                    "O Kiosk Browser ou o WindowRouter estão em execução.\n\n" +
-                    "Sim = Sair e encerrar tudo\nNão = Minimizar para a bandeja\nCancelar = Voltar", 
-                    "KioskMax", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button2);
+			if (displayRunning || routerRunning)
+			{
+				var result = MessageBox.Show(
+					"Sair encerra o navegador Kiosk e o Window Router.\n\nConfirma encerrar tudo?",
+					"KioskMax",
+					MessageBoxButtons.YesNo,
+					MessageBoxIcon.Question,
+					MessageBoxDefaultButton.Button2);
 
-                // Cancel default close behavior
-                e.Cancel = true;
+				e.Cancel = true;
 
-                if (result == DialogResult.Yes)
-                {
-                    // Exit entire app; cleanup será feito pelo contexto
-                    this.Hide();
-                    BeginInvoke(new Action(() => Application.Exit()));
-                    return;
-                }
-                if (result == DialogResult.No)
-                {
-                    // Just hide to tray
-                    this.Hide();
-                    return;
-                }
-                // Cancel = do nothing
-                return;
-            }
+				if (result == DialogResult.Yes)
+				{
+					this.Hide();
+					BeginInvoke(new Action(() => Application.Exit()));
+					return;
+				}
+
+				return;
+			}
 
             // Default: hide instead of close
             e.Cancel = true;
@@ -149,10 +152,13 @@ public partial class ControllerForm : Form
                 {
                     MessageBox.Show($"Shutdown failed: {result.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
+
+                WindowRouterLifecycle.StopRoutingProcesses();
             }
             else
             {
                 StartDisplayProcess();
+                WindowRouterLifecycle.TryLaunchRouterIfEnabled(out _);
             }
 
             await Task.Delay(800);
@@ -286,6 +292,22 @@ public partial class ControllerForm : Form
     private void chkRouter_CheckedChanged(object sender, EventArgs e)
     {
         _config.RouterEnabled = chkRouter.Checked;
+        ConfigManager.SaveConfig(_config);
+    }
+
+    private void cmbRouterFilter_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        var item = cmbRouterFilter.SelectedItem?.ToString();
+        if (string.IsNullOrEmpty(item))
+            return;
+
+        _config.RouterWindowFilterMode = item;
+        ConfigManager.SaveConfig(_config);
+    }
+
+    private void chkRouterDebugLogging_CheckedChanged(object? sender, EventArgs e)
+    {
+        _config.RouterDebugLogging = chkRouterDebugLogging.Checked;
         ConfigManager.SaveConfig(_config);
     }
 

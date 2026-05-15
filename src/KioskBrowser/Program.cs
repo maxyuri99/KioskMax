@@ -1,5 +1,6 @@
 using Serilog;
 using NpsShared.Configuration;
+using NpsShared.Utilities;
 
 namespace NpsDisplay;
 
@@ -22,6 +23,8 @@ static class Program
 
         try { ConfigManager.CleanupOldLogs(30); } catch { }
         Log.Information("=== KioskBrowser Starting ===");
+
+        KioskProcessTakeover.KillOtherInstancesSameExe(Environment.ProcessId);
 
         try
         {

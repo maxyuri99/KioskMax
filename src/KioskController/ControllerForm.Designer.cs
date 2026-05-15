@@ -13,6 +13,9 @@ partial class ControllerForm
     private Label lblMonitor = null!;
     private ComboBox cmbMonitors = null!;
     private CheckBox chkRouter = null!;
+    private Label lblRouterFilter = null!;
+    private ComboBox cmbRouterFilter = null!;
+    private CheckBox chkRouterDebugLogging = null!;
     private Button btnOpenLogs = null!;
     private Button btnOpenConfig = null!;
     private LinkLabel lnkAuthor = null!;
@@ -35,7 +38,7 @@ partial class ControllerForm
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = true;
-        ClientSize = new Size(560, 300);
+        ClientSize = new Size(560, 348);
 
         lblTitle = new Label
         {
@@ -112,11 +115,32 @@ partial class ControllerForm
         };
         chkRouter.CheckedChanged += chkRouter_CheckedChanged;
 
+        lblRouterFilter = new Label
+        {
+            AutoSize = true,
+            Text = "Router filter:",
+            Location = new Point(16, 198)
+        };
+
+        cmbRouterFilter = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Size = new Size(120, 28),
+            Location = new Point(100, 194)
+        };
+
+        chkRouterDebugLogging = new CheckBox
+        {
+            AutoSize = true,
+            Text = "Log skipped windows (restart Router)",
+            Location = new Point(236, 196)
+        };
+
         btnOpenLogs = new Button
         {
             Text = "Open Logs",
             Size = new Size(100, 28),
-            Location = new Point(16, 210)
+            Location = new Point(16, 246)
         };
         btnOpenLogs.Click += btnOpenLogs_Click;
 
@@ -124,7 +148,7 @@ partial class ControllerForm
         {
             Text = "Open Config",
             Size = new Size(110, 28),
-            Location = new Point(126, 210)
+            Location = new Point(126, 246)
         };
         btnOpenConfig.Click += btnOpenConfig_Click;
 
@@ -132,7 +156,7 @@ partial class ControllerForm
         {
             AutoSize = true,
             Text = "Criado por Max Yuri (GitHub)",
-            Location = new Point(16, 252),
+            Location = new Point(16, 288),
             LinkColor = Color.RoyalBlue,
             ActiveLinkColor = Color.DarkBlue
         };
@@ -159,6 +183,9 @@ partial class ControllerForm
         Controls.Add(lblMonitor);
         Controls.Add(cmbMonitors);
         Controls.Add(chkRouter);
+        Controls.Add(lblRouterFilter);
+        Controls.Add(cmbRouterFilter);
+        Controls.Add(chkRouterDebugLogging);
         Controls.Add(btnOpenLogs);
         Controls.Add(btnOpenConfig);
         Controls.Add(lnkAuthor);

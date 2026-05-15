@@ -2,6 +2,7 @@ using System.Diagnostics;
 using NpsShared.Configuration;
 using NpsShared.IPC;
 using NpsShared.Models;
+using NpsShared.Utilities;
 using Serilog;
 using System.Runtime.InteropServices;
 
@@ -326,11 +327,11 @@ public class TrayApplicationContext : ApplicationContext
 		try
 		{
 			Log.Information("StartDisplay(): begin");
-			if (_displayProcess != null && !_displayProcess.HasExited)
-			{
-				Log.Warning("Display process already running");
-				return;
-			}
+
+			KioskProcessTakeover.KillAllWithImageName("KioskBrowser");
+			KioskProcessTakeover.KillAllWithImageName("NpsDisplay");
+			Thread.Sleep(300);
+			_displayProcess = null;
 			
 			var displayExePath = GetDisplayExecutablePath();
 			Log.Information("Resolved KioskBrowser path: {Path}", displayExePath);
@@ -364,6 +365,9 @@ public class TrayApplicationContext : ApplicationContext
 					catch { }
 				};
 			}
+
+			_config = ConfigManager.LoadConfig();
+			StartWindowRouter();
 			
 			// Give it a moment to start
 			Task.Delay(1000).ContinueWith(_ => UpdateStatus());
@@ -399,6 +403,9 @@ public class TrayApplicationContext : ApplicationContext
 			
 			await UpdateStatus();
 			_displayProcess = null;
+
+			StopWindowRouter();
+			Log.Information("Window Router stopped together with display");
 		}
 		catch (Exception ex)
 		{
@@ -519,9 +526,19 @@ public class TrayApplicationContext : ApplicationContext
 		{
 			if (_config.RouterEnabled)
 			{
-				StartWindowRouter();
-				MessageBox.Show("Window Router enabled and started.", "Window Router", 
-					MessageBoxButtons.OK, MessageBoxIcon.Information);
+				if (!StartWindowRouter())
+				{
+					MessageBox.Show(
+						"Window Router está habilitado na configuração, mas não foi possível iniciar.\nVerifique se WindowRouter.exe está na mesma pasta do Controller e consulte os logs.",
+						"Window Router",
+						MessageBoxButtons.OK,
+						MessageBoxIcon.Warning);
+				}
+				else
+				{
+					MessageBox.Show("Window Router enabled and started.", "Window Router",
+						MessageBoxButtons.OK, MessageBoxIcon.Information);
+				}
 			}
 			else
 			{
@@ -685,45 +702,25 @@ public class TrayApplicationContext : ApplicationContext
 	
 	private Process? _routerProcess;
 	
-	private void StartWindowRouter()
-	{
-		if (_routerProcess != null && !_routerProcess.HasExited)
-		{
-			return;
-		}
-		
-		var exePath = ResolveSiblingExecutablePath("WindowRouter.exe");
-		if (!File.Exists(exePath))
-		{
-			throw new FileNotFoundException("WindowRouter.exe not found", exePath);
-		}
-		
-		_routerProcess = Process.Start(new ProcessStartInfo
-		{
-			FileName = exePath,
-			UseShellExecute = false
-		});
-		Log.Information("WindowRouter started: PID {PID}", _routerProcess?.Id);
-	}
-	
-	private void StopWindowRouter()
+	private bool StartWindowRouter()
 	{
 		try
 		{
 			if (_routerProcess != null && !_routerProcess.HasExited)
-			{
-				_routerProcess.Kill();
-				_routerProcess.WaitForExit(3000);
-			}
+				_routerProcess.Dispose();
 		}
-		catch (Exception ex)
-		{
-			Log.Warning(ex, "Failed to stop WindowRouter process cleanly");
-		}
-		finally
-		{
-			_routerProcess = null;
-		}
+		catch { }
+
+		var ok = WindowRouterLifecycle.TryLaunchRouterIfEnabled(out _routerProcess);
+		if (!ok)
+			Log.Warning("Window Router is enabled in config but failed to start (exe missing or error — see logs)");
+		return ok;
+	}
+	
+	private void StopWindowRouter()
+	{
+		_routerProcess = null;
+		WindowRouterLifecycle.StopRoutingProcesses();
 	}
 	
 	private void SetBusy(bool isBusy, string? message = null)
@@ -737,76 +734,6 @@ public class TrayApplicationContext : ApplicationContext
 			Cursor.Current = isBusy ? Cursors.WaitCursor : Cursors.Default;
 		}
 		catch { }
-	}
-	
-	private string ResolveSiblingExecutablePath(string fileName)
-	{
-		var runtimeBase = AppDomain.CurrentDomain.BaseDirectory;
-		var exePath = Process.GetCurrentProcess().MainModule?.FileName ?? runtimeBase;
-		var exeDir = Path.GetDirectoryName(exePath) ?? runtimeBase;
-		
-		var sameDir = Path.Combine(exeDir, fileName);
-		if (File.Exists(sameDir)) return sameDir;
-		
-		// Build a comprehensive set of candidate roots by walking up ancestors
-		var rootsToSearch = new List<string>();
-		void AddAncestors(string start)
-		{
-			try
-			{
-				var current = new DirectoryInfo(start);
-				for (int i = 0; i < 8 && current != null; i++)
-				{
-					rootsToSearch.Add(current.FullName);
-					current = current.Parent;
-				}
-			}
-			catch { }
-		}
-		
-		AddAncestors(exeDir);
-		AddAncestors(runtimeBase);
-		
-		foreach (var root in rootsToSearch.Distinct())
-		{
-			// 1) Sibling layout: <root>\WindowRouter.exe or <root>\WindowRouter\WindowRouter.exe
-			var s1 = Path.Combine(root, fileName);
-			if (File.Exists(s1)) return s1;
-			var s2 = Path.Combine(root, "WindowRouter", fileName);
-			if (File.Exists(s2)) return s2;
-			
-			// 2) Dev bin layouts
-			var d1 = Path.Combine(root, "WindowRouter", "bin", "Debug", "net8.0-windows", fileName);
-			if (File.Exists(d1)) return d1;
-			var d2 = Path.Combine(root, "src", "WindowRouter", "bin", "Debug", "net8.0-windows", fileName);
-			if (File.Exists(d2)) return d2;
-			var d3 = Path.Combine(root, "..", "src", "WindowRouter", "bin", "Debug", "net8.0-windows", fileName);
-			var d3Full = Path.GetFullPath(d3);
-			if (File.Exists(d3Full)) return d3Full;
-			
-			// 3) Published layout
-			var p1 = Path.Combine(root, "build", "publish", "WindowRouter", fileName);
-			if (File.Exists(p1)) return p1;
-			var p2 = Path.Combine(root, "Router", fileName);
-			if (File.Exists(p2)) return p2;
-			var p3 = Path.Combine(root, "temp-run", "WindowRouter", fileName);
-			if (File.Exists(p3)) return p3;
-		}
-		
-		// Broad search fallback from the nearest plausible roots
-		foreach (var root in rootsToSearch.Distinct())
-		{
-			try
-			{
-				var found = Directory.EnumerateFiles(root, fileName, SearchOption.AllDirectories)
-					.OrderByDescending(p => p.Contains("net8.0-windows"))
-					.FirstOrDefault();
-				if (!string.IsNullOrEmpty(found)) return found!;
-			}
-			catch { }
-		}
-		
-		return sameDir;
 	}
 	
 	private static void TryKillByName(string processName)
@@ -970,7 +897,13 @@ public class TrayApplicationContext : ApplicationContext
 		window.HotkeyPressed += (_, args) =>
 		{
 			Log.Information("Global hotkey received: {Id}", args.HotkeyId);
-			ShowController();
+			if (args.HotkeyId == 1)
+				ShowController();
+			else if (args.HotkeyId == 2)
+				_ = Task.Run(async () =>
+				{
+					try { await IpcClient.ToggleTopMostAsync(); } catch (Exception ex) { Log.Warning(ex, "ToggleTopMost from hotkey failed"); }
+				});
 		};
 		
 		// Ctrl+Alt+K

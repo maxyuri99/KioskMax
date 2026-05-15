@@ -1,5 +1,6 @@
 using Serilog;
 using NpsShared.Configuration;
+using NpsShared.Utilities;
 
 namespace KioskController;
 
@@ -23,6 +24,13 @@ static class Program
         // Opportunistic log cleanup (older than 30 days)
         try { ConfigManager.CleanupOldLogs(30); } catch { }
         Log.Information("=== KioskController Starting ===");
+
+        var pid = Environment.ProcessId;
+        KioskProcessTakeover.KillOtherInstancesSameExe(pid);
+        KioskProcessTakeover.KillAllWithImageName("WindowRouter");
+        KioskProcessTakeover.KillAllWithImageName("KioskBrowser");
+        KioskProcessTakeover.KillAllWithImageName("NpsDisplay");
+        Thread.Sleep(400);
 
         try
         {
