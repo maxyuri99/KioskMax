@@ -2,6 +2,7 @@ param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
     [string]$OutputDir = "build/publish",
+    [string]$Version = "1.3.0",
     [switch]$Zip
 )
 
@@ -35,6 +36,9 @@ foreach ($project in $projects) {
         -p:PublishSingleFile=true `
         -p:IncludeNativeLibrariesForSelfExtract=true `
         -p:PublishTrimmed=false `
+        -p:Version=$Version `
+        -p:FileVersion=$Version `
+        -p:InformationalVersion=$Version `
         -o $outDir
 
     if ($LASTEXITCODE -ne 0) { throw "Failed to publish $($project.Name)" }

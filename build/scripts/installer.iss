@@ -8,7 +8,7 @@
   #define MyAppPublisher "Max Yuri"
 #endif
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.3.0"
 #endif
 #ifndef MyAppURL
   #define MyAppURL "https://github.com/maxyuri99/"

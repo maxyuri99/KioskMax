@@ -19,7 +19,12 @@ public class NpsConfig
     /// Strict: legacy filters (skip WS_EX_TOOLWINDOW and caption-less popups).
     /// Relaxed: route those windows too if they visibly intersect the kiosk monitor (helps PDV/TEF popups).
     /// </summary>
-    public string RouterWindowFilterMode { get; set; } = "Strict";
+    public string RouterWindowFilterMode { get; set; } = "Relaxed";
+    /// <summary>
+    /// Extra process names (without .exe) that are always pulled off the kiosk monitor.
+    /// Built-in SiTef names are always included even if this list is empty.
+    /// </summary>
+    public List<string> RouterForceProcessNames { get; set; } = new();
     /// <summary>
     /// Minimum area in pixels (of the rectangle intersecting the kiosk monitor) required to consider routing.
     /// </summary>

@@ -118,7 +118,7 @@ partial class ControllerForm
         lblRouterFilter = new Label
         {
             AutoSize = true,
-            Text = "Router filter:",
+            Text = "Router filter (TEF):",
             Location = new Point(16, 198)
         };
 
@@ -126,14 +126,14 @@ partial class ControllerForm
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
             Size = new Size(120, 28),
-            Location = new Point(100, 194)
+            Location = new Point(148, 194)
         };
 
         chkRouterDebugLogging = new CheckBox
         {
             AutoSize = true,
             Text = "Log skipped windows (restart Router)",
-            Location = new Point(236, 196)
+            Location = new Point(280, 196)
         };
 
         btnOpenLogs = new Button

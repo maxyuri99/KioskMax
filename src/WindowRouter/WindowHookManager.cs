@@ -7,15 +7,39 @@ using Serilog;
 
 namespace WindowRouter;
 
-/// <summary>
-/// Manages Windows event hooks to detect and route windows
-/// </summary>
 public class WindowHookManager : IDisposable
 {
     private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
-    private const uint EVENT_OBJECT_SHOW = 0x8002;
+    private const uint EVENT_SYSTEM_DIALOGSTART = 0x0010;
     private const uint EVENT_OBJECT_CREATE = 0x8000;
+    private const uint EVENT_OBJECT_SHOW = 0x8002;
+    private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
     private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    private const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+    private const int OBJID_WINDOW = 0;
+    private const int OBJID_CLIENT = unchecked((int)0xFFFFFFFC);
+
+    private static readonly string[] BuiltInForceRouteProcessNames =
+    {
+        "PDVSiTef",
+        "CliSiTef",
+        "CliSiTefI",
+        "CliSiTefL",
+        "CliSiTef32",
+        "SiTef",
+        "SiTefCom",
+        "SitefCom",
+        "SitefClient",
+        "InterfaceSiTef",
+        "SESiTef"
+    };
+
+    private static readonly string[] ForceRouteTitleFragments =
+    {
+        "sitef",
+        "pdvsitef",
+        "clisitef"
+    };
 
     private NpsConfig _config;
     private Screen _npsMonitor;
@@ -23,100 +47,93 @@ public class WindowHookManager : IDisposable
     private IntPtr _foregroundHook;
     private IntPtr _showHook;
     private IntPtr _createHook;
+    private IntPtr _locationHook;
+    private IntPtr _dialogHook;
     private WinEventDelegate? _foregroundDelegate;
     private WinEventDelegate? _showDelegate;
     private WinEventDelegate? _createDelegate;
+    private WinEventDelegate? _locationDelegate;
+    private WinEventDelegate? _dialogDelegate;
     private System.Windows.Forms.Timer? _scanTimer;
+    private System.Windows.Forms.Timer? _pinTimer;
     private readonly HashSet<string> _exemptProcessNames;
+    private readonly HashSet<IntPtr> _stickyHwnds = new();
+    private readonly Dictionary<uint, (string Name, long Tick)> _processNameCache = new();
+    private readonly Dictionary<IntPtr, long> _lastForceRouteLogTick = new();
+    private HashSet<string> _forceRouteProcessNames;
 
-    /// <summary>When true, hooks keep running but windows are not moved.</summary>
     public bool RoutingPaused { get; set; }
 
     public WindowHookManager(NpsConfig config)
     {
         _config = config;
+        _forceRouteProcessNames = BuildForceRouteProcessNames(_config);
 
-        // Exempt processes that should not be moved
         _exemptProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "KioskBrowser",
-            "NpsDisplay", // legacy
+            "NpsDisplay",
             "WindowRouter",
             "taskmgr",
-            "ApplicationFrameHost" // UWP host
+            "ApplicationFrameHost"
         };
 
         var screens = Screen.AllScreens;
         _npsMonitor = Screen.PrimaryScreen ?? (screens.Length > 0 ? screens[0] : throw new InvalidOperationException("No screens"));
         _targetMonitor = _npsMonitor;
 
-        // Fresh config file + kiosk browser HWND + RouterTarget Opposite/etc.
         SynchronizeRoutingLayout();
 
         Log.Information(
-            "Window Router: Kiosk Monitor = {NPS}, Target Monitor = {Target}, FilterMode = {Mode}, MinVisibleArea = {MinArea}, DebugLogging = {Debug}",
+            "Window Router: Kiosk Monitor = {NPS}, Target Monitor = {Target}, FilterMode = {Mode}, MinVisibleArea = {MinArea}, ForceRoute = {Force}, DebugLogging = {Debug}",
             _npsMonitor.DeviceName, _targetMonitor.DeviceName,
             IsRelaxedMode() ? "Relaxed" : "Strict",
             EffectiveMinVisibleArea(),
+            string.Join(",", _forceRouteProcessNames),
             _config.RouterDebugLogging);
     }
 
     public void Start()
     {
-        // Create delegates (must be kept alive!)
-        _foregroundDelegate = new WinEventDelegate(WinEventProc);
-        _showDelegate = new WinEventDelegate(WinEventProc);
-        _createDelegate = new WinEventDelegate(WinEventProc);
+        _foregroundDelegate = WinEventProc;
+        _showDelegate = WinEventProc;
+        _createDelegate = WinEventProc;
+        _locationDelegate = WinEventProc;
+        _dialogDelegate = WinEventProc;
 
-        // Set hooks
-        _foregroundHook = SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
-            IntPtr.Zero, _foregroundDelegate,
-            0, 0, WINEVENT_OUTOFCONTEXT);
+        var hookFlags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
 
-        _showHook = SetWinEventHook(
-            EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
-            IntPtr.Zero, _showDelegate,
-            0, 0, WINEVENT_OUTOFCONTEXT);
+        _foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, _foregroundDelegate, 0, 0, hookFlags);
+        _showHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, IntPtr.Zero, _showDelegate, 0, 0, hookFlags);
+        _createHook = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE, IntPtr.Zero, _createDelegate, 0, 0, hookFlags);
+        _locationHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, IntPtr.Zero, _locationDelegate, 0, 0, hookFlags);
+        _dialogHook = SetWinEventHook(EVENT_SYSTEM_DIALOGSTART, EVENT_SYSTEM_DIALOGSTART, IntPtr.Zero, _dialogDelegate, 0, 0, hookFlags);
 
-        _createHook = SetWinEventHook(
-            EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE,
-            IntPtr.Zero, _createDelegate,
-            0, 0, WINEVENT_OUTOFCONTEXT);
-
-        if (_foregroundHook == IntPtr.Zero || _showHook == IntPtr.Zero || _createHook == IntPtr.Zero)
+        if (_foregroundHook == IntPtr.Zero || _showHook == IntPtr.Zero || _createHook == IntPtr.Zero
+            || _locationHook == IntPtr.Zero || _dialogHook == IntPtr.Zero)
         {
             Log.Error("Failed to set window event hooks");
             throw new InvalidOperationException("Failed to set window event hooks");
         }
 
-        // Periodic scan to catch missed windows
-        _scanTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+        _scanTimer = new System.Windows.Forms.Timer { Interval = 400 };
         _scanTimer.Tick += (_, _) => SafeScanAndRoute();
         _scanTimer.Start();
 
-        Log.Information("Window event hooks installed and scan timer started");
+        _pinTimer = new System.Windows.Forms.Timer { Interval = 80 };
+        _pinTimer.Tick += (_, _) => PinStickyWindows();
+        _pinTimer.Start();
+
+        Log.Information("Window event hooks installed and scan/pin timers started");
     }
 
     public void Stop()
     {
-        if (_foregroundHook != IntPtr.Zero)
-        {
-            UnhookWinEvent(_foregroundHook);
-            _foregroundHook = IntPtr.Zero;
-        }
-
-        if (_showHook != IntPtr.Zero)
-        {
-            UnhookWinEvent(_showHook);
-            _showHook = IntPtr.Zero;
-        }
-
-        if (_createHook != IntPtr.Zero)
-        {
-            UnhookWinEvent(_createHook);
-            _createHook = IntPtr.Zero;
-        }
+        Unhook(ref _foregroundHook);
+        Unhook(ref _showHook);
+        Unhook(ref _createHook);
+        Unhook(ref _locationHook);
+        Unhook(ref _dialogHook);
 
         if (_scanTimer != null)
         {
@@ -125,34 +142,51 @@ public class WindowHookManager : IDisposable
             _scanTimer = null;
         }
 
+        if (_pinTimer != null)
+        {
+            _pinTimer.Stop();
+            _pinTimer.Dispose();
+            _pinTimer = null;
+        }
+
         Log.Information("Window event hooks removed");
+    }
+
+    private static void Unhook(ref IntPtr hook)
+    {
+        if (hook == IntPtr.Zero)
+            return;
+        UnhookWinEvent(hook);
+        hook = IntPtr.Zero;
     }
 
     private void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
-        // Only handle window events (not child objects)
-        if (idObject != 0 || idChild != 0)
+        if (hwnd == IntPtr.Zero)
             return;
 
-        if (hwnd == IntPtr.Zero)
+        if (idChild != 0)
+            return;
+
+        if (idObject != OBJID_WINDOW && idObject != OBJID_CLIENT)
             return;
 
         try
         {
+            var root = GetAncestor(hwnd, GA_ROOT);
+            if (root != IntPtr.Zero)
+                hwnd = root;
+
+            if (eventType == EVENT_OBJECT_LOCATIONCHANGE && !_stickyHwnds.Contains(hwnd))
+                return;
+
             RefreshLayoutFromRunningBrowserOnly();
 
             if (RoutingPaused)
                 return;
 
-            if (ShouldRouteWindow(hwnd, out var skipReason))
-            {
-                RouteWindowToTargetMonitor(hwnd);
-            }
-            else if (!string.IsNullOrEmpty(skipReason))
-            {
-                LogSkippedCandidate(hwnd, skipReason);
-            }
+            TrackAndRoute(hwnd);
         }
         catch (Exception ex)
         {
@@ -173,25 +207,62 @@ public class WindowHookManager : IDisposable
             {
                 try
                 {
-                    if (ShouldRouteWindow(hWnd, out var skipReason))
-                    {
-                        RouteWindowToTargetMonitor(hWnd);
-                    }
-                    else if (!string.IsNullOrEmpty(skipReason))
-                    {
-                        LogSkippedCandidate(hWnd, skipReason);
-                    }
+                    TrackAndRoute(hWnd);
                 }
                 catch (Exception ex)
                 {
                     Log.Debug(ex, "Error scanning window");
                 }
-                return true; // continue
+                return true;
             }, IntPtr.Zero);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Error during periodic scan");
+        }
+    }
+
+    private void PinStickyWindows()
+    {
+        if (RoutingPaused || _stickyHwnds.Count == 0)
+            return;
+
+        try
+        {
+            RefreshLayoutFromRunningBrowserOnly();
+
+            foreach (var hwnd in _stickyHwnds.ToArray())
+            {
+                if (!IsWindow(hwnd))
+                {
+                    _stickyHwnds.Remove(hwnd);
+                    _lastForceRouteLogTick.Remove(hwnd);
+                    continue;
+                }
+
+                if (ShouldRouteWindow(hwnd, out _))
+                    RouteWindowToTargetMonitor(hwnd, activate: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Error pinning sticky windows");
+        }
+    }
+
+    private void TrackAndRoute(IntPtr hwnd)
+    {
+        var force = IsForceRouteWindow(hwnd);
+        if (force)
+            _stickyHwnds.Add(hwnd);
+
+        if (ShouldRouteWindow(hwnd, out var skipReason))
+        {
+            RouteWindowToTargetMonitor(hwnd, activate: force);
+        }
+        else if (!force && !string.IsNullOrEmpty(skipReason))
+        {
+            LogSkippedCandidate(hwnd, skipReason);
         }
     }
 
@@ -202,6 +273,22 @@ public class WindowHookManager : IDisposable
     {
         var v = _config.RouterMinVisibleArea;
         return v < 1 ? 400 : v;
+    }
+
+    private static HashSet<string> BuildForceRouteProcessNames(NpsConfig config)
+    {
+        var set = new HashSet<string>(BuiltInForceRouteProcessNames, StringComparer.OrdinalIgnoreCase);
+        if (config.RouterForceProcessNames == null)
+            return set;
+
+        foreach (var name in config.RouterForceProcessNames)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+            set.Add(name.Trim());
+        }
+
+        return set;
     }
 
     private static Rectangle RectToRectangle(RECT r) =>
@@ -219,36 +306,35 @@ public class WindowHookManager : IDisposable
         return true;
     }
 
-    /// <summary>
-    /// Whether to route this HWND. When debug logging is enabled and the window visibly intersects the kiosk monitor
-    /// but is skipped, <paramref name="skipReason"/> describes why (for diagnostics only).
-    /// </summary>
     private bool ShouldRouteWindow(IntPtr hwnd, out string? skipReason)
     {
         skipReason = null;
 
-        if (!IsWindowVisible(hwnd))
+        if (!IsWindowVisible(hwnd) || IsIconic(hwnd))
             return false;
 
         var rect = new RECT();
         if (!GetWindowRect(hwnd, ref rect))
             return false;
 
-        if (!TryGetKioskIntersectionArea(rect, out var intersectArea))
+        var force = IsForceRouteWindow(hwnd);
+        var onKioskMonitor = IsWindowOnKioskMonitor(hwnd, rect, out var intersectArea);
+
+        if (!onKioskMonitor)
             return false;
 
-        if (intersectArea < EffectiveMinVisibleArea())
+        if (!force && intersectArea < EffectiveMinVisibleArea())
         {
             if (_config.RouterDebugLogging)
                 skipReason = $"below_min_visible_area (intersect={intersectArea}, min={EffectiveMinVisibleArea()})";
             return false;
         }
 
-        uint style = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_STYLE).ToInt64());
-        uint exStyle = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_EXSTYLE).ToInt64());
-
-        if (!IsRelaxedMode())
+        if (!force && !IsRelaxedMode())
         {
+            uint style = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_STYLE).ToInt64());
+            uint exStyle = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_EXSTYLE).ToInt64());
+
             if ((exStyle & WS_EX_TOOLWINDOW) != 0)
             {
                 if (_config.RouterDebugLogging)
@@ -266,9 +352,8 @@ public class WindowHookManager : IDisposable
 
         try
         {
-            GetWindowThreadProcessId(hwnd, out uint processId);
-            using var process = Process.GetProcessById((int)processId);
-            var processName = process.ProcessName;
+            if (!TryGetProcessName(hwnd, out var processName, out _))
+                return force;
 
             if (_exemptProcessNames.Contains(processName))
             {
@@ -277,7 +362,6 @@ public class WindowHookManager : IDisposable
                 return false;
             }
 
-            // explorer.exe hosts desktop/taskbar and folder windows — only skip shell chrome, route File Explorer (CabinetWClass, etc.).
             if (string.Equals(processName, "explorer", StringComparison.OrdinalIgnoreCase))
             {
                 var cls = GetWindowClassName(hwnd);
@@ -295,6 +379,77 @@ public class WindowHookManager : IDisposable
         catch (Exception ex)
         {
             Log.Debug(ex, "Could not determine if window should be routed");
+            return force;
+        }
+    }
+
+    private bool IsWindowOnKioskMonitor(IntPtr hwnd, RECT rect, out int intersectArea)
+    {
+        var hasIntersect = TryGetKioskIntersectionArea(rect, out intersectArea);
+        var hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (hMon != IntPtr.Zero && MonitorDeviceNameEqualsScreen(hMon, _npsMonitor))
+            return true;
+        return hasIntersect;
+    }
+
+    private bool IsForceRouteWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            return false;
+
+        if (TryGetProcessName(hwnd, out var processName, out _)
+            && _forceRouteProcessNames.Contains(processName))
+        {
+            return true;
+        }
+
+        var title = GetWindowTitle(hwnd);
+        if (!string.IsNullOrEmpty(title))
+        {
+            foreach (var fragment in ForceRouteTitleFragments)
+            {
+                if (title.Contains(fragment, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        var cls = GetWindowClassName(hwnd);
+        if (!string.IsNullOrEmpty(cls))
+        {
+            foreach (var fragment in ForceRouteTitleFragments)
+            {
+                if (cls.Contains(fragment, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryGetProcessName(IntPtr hwnd, out string processName, out uint processId)
+    {
+        processName = "";
+        GetWindowThreadProcessId(hwnd, out processId);
+        if (processId == 0)
+            return false;
+
+        var now = Environment.TickCount64;
+        if (_processNameCache.TryGetValue(processId, out var cached) && now - cached.Tick < 2000)
+        {
+            processName = cached.Name;
+            return true;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById((int)processId);
+            processName = process.ProcessName;
+            _processNameCache[processId] = (processName, now);
+            return true;
+        }
+        catch
+        {
+            _processNameCache.Remove(processId);
             return false;
         }
     }
@@ -315,14 +470,9 @@ public class WindowHookManager : IDisposable
         try
         {
             var cls = GetWindowClassName(hwnd);
-            GetWindowThreadProcessId(hwnd, out uint pid);
-            string procName = "?";
-            try
-            {
-                using var p = Process.GetProcessById((int)pid);
-                procName = p.ProcessName;
-            }
-            catch { /* ignore */ }
+            TryGetProcessName(hwnd, out var procName, out _);
+            if (string.IsNullOrEmpty(procName))
+                procName = "?";
 
             var rect = new RECT();
             GetWindowRect(hwnd, ref rect);
@@ -346,7 +496,16 @@ public class WindowHookManager : IDisposable
         return GetClassNameW(hwnd, sb, sb.Capacity) == 0 ? "" : sb.ToString();
     }
 
-    private void RouteWindowToTargetMonitor(IntPtr hwnd)
+    private static string GetWindowTitle(IntPtr hwnd)
+    {
+        var len = GetWindowTextLengthW(hwnd);
+        if (len <= 0)
+            return "";
+        var sb = new StringBuilder(len + 1);
+        return GetWindowTextW(hwnd, sb, sb.Capacity) <= 0 ? "" : sb.ToString();
+    }
+
+    private void RouteWindowToTargetMonitor(IntPtr hwnd, bool activate)
     {
         try
         {
@@ -356,43 +515,58 @@ public class WindowHookManager : IDisposable
 
             var width = rect.Right - rect.Left;
             var height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0)
+                return;
 
-            // Calculate new position on target monitor (centered)
             var newX = _targetMonitor.Bounds.Left + (_targetMonitor.Bounds.Width - width) / 2;
             var newY = _targetMonitor.Bounds.Top + (_targetMonitor.Bounds.Height - height) / 2;
 
             var wasMaximized = IsZoomed(hwnd);
 
-            // Avoid restore/move/maximize loops that cause fullscreen/maximized windows to flicker when already on the target monitor.
-            if (IsWindowAlreadyPlacedOnTarget(hwnd, rect, width, height, newX, newY, wasMaximized))
+            if (IsWindowAlreadyPlacedOnTarget(hwnd, rect, newX, newY, wasMaximized))
                 return;
 
-            // Preserve maximized state: restore, move, then re-maximize if needed
             if (wasMaximized)
-            {
                 ShowWindow(hwnd, SW_RESTORE);
-            }
 
-            // Move window without changing Z-order or activation
-            if (!SetWindowPos(hwnd, IntPtr.Zero, newX, newY, width, height,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE))
+            if (!TryMoveWindow(hwnd, newX, newY, width, height, activate))
             {
-                if (_config.RouterDebugLogging)
-                {
-                    var err = Marshal.GetLastWin32Error();
-                    LogSkippedCandidate(hwnd, $"setwindowpos_failed win32={err}");
-                }
+                Log.Warning(
+                    "SetWindowPos failed for HWND=0x{Hwnd:X} Class={Class} Title={Title} win32={Err}",
+                    hwnd.ToInt64(), GetWindowClassName(hwnd), GetWindowTitle(hwnd), Marshal.GetLastWin32Error());
                 return;
             }
 
             if (wasMaximized)
-            {
                 ShowWindow(hwnd, SW_MAXIMIZE);
+
+            if (activate)
+                TryFocusWindow(hwnd);
+
+            var still = new RECT();
+            if (GetWindowRect(hwnd, ref still) && IsWindowOnKioskMonitor(hwnd, still, out _) && activate)
+            {
+                ShowWindow(hwnd, SW_HIDE);
+                TryMoveWindow(hwnd, newX, newY, width, height, activate: true);
+                ShowWindow(hwnd, SW_SHOW);
+                TryFocusWindow(hwnd);
             }
 
-            GetWindowThreadProcessId(hwnd, out uint processId);
-            using var process = Process.GetProcessById((int)processId);
-            Log.Debug("Routed window from {Process} to target monitor", process.ProcessName);
+            TryGetProcessName(hwnd, out var processName, out _);
+            if (activate)
+            {
+                var now = Environment.TickCount64;
+                if (!_lastForceRouteLogTick.TryGetValue(hwnd, out var last) || now - last >= 2000)
+                {
+                    _lastForceRouteLogTick[hwnd] = now;
+                    Log.Information("Routed TEF/forced window from {Process} ({Title}) to target monitor",
+                        processName, GetWindowTitle(hwnd));
+                }
+            }
+            else
+            {
+                Log.Debug("Routed window from {Process} to target monitor", processName);
+            }
         }
         catch (Exception ex)
         {
@@ -400,7 +574,70 @@ public class WindowHookManager : IDisposable
         }
     }
 
-    /// <summary>Desktop/taskbar/shell windows hosted by explorer.exe — not folder/File Explorer.</summary>
+    private bool TryMoveWindow(IntPtr hwnd, int x, int y, int width, int height, bool activate)
+    {
+        uint exStyle = unchecked((uint)GetWindowStylePtr(hwnd, GWLP_EXSTYLE).ToInt64());
+        var isTopMost = (exStyle & WS_EX_TOPMOST) != 0;
+        var insertAfter = isTopMost ? HWND_TOPMOST : HWND_NOTOPMOST;
+        uint flags = SWP_NOACTIVATE | SWP_NOSIZE;
+        if (!isTopMost)
+            flags |= SWP_NOZORDER;
+        if (activate)
+            flags &= ~SWP_NOACTIVATE;
+
+        if (SetWindowPos(hwnd, insertAfter, x, y, width, height, flags))
+            return true;
+
+        uint thisTid = GetCurrentThreadId();
+        uint otherTid = GetWindowThreadProcessId(hwnd, out _);
+        var attached = otherTid != 0 && otherTid != thisTid && AttachThreadInput(thisTid, otherTid, true);
+        try
+        {
+            if (SetWindowPos(hwnd, insertAfter, x, y, width, height, flags))
+                return true;
+
+            if (SetWindowPos(hwnd, insertAfter, x, y, width, height, flags & ~SWP_NOSIZE))
+                return true;
+
+            return MoveWindow(hwnd, x, y, width, height, true);
+        }
+        finally
+        {
+            if (attached)
+                AttachThreadInput(thisTid, otherTid, false);
+        }
+    }
+
+    private static void TryFocusWindow(IntPtr hwnd)
+    {
+        try
+        {
+            AllowSetForegroundWindow(ASFW_ANY);
+            var fg = GetForegroundWindow();
+            uint selfTid = GetCurrentThreadId();
+            uint fgTid = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
+            uint targetTid = GetWindowThreadProcessId(hwnd, out _);
+
+            var attachedFg = fgTid != 0 && fgTid != selfTid && AttachThreadInput(selfTid, fgTid, true);
+            var attachedTarget = targetTid != 0 && targetTid != selfTid && AttachThreadInput(selfTid, targetTid, true);
+            try
+            {
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+            }
+            finally
+            {
+                if (attachedTarget)
+                    AttachThreadInput(selfTid, targetTid, false);
+                if (attachedFg)
+                    AttachThreadInput(selfTid, fgTid, false);
+            }
+        }
+        catch
+        {
+        }
+    }
+
     private static bool IsExplorerShellChromeWindowClass(string className) =>
         string.Equals(className, "Progman", StringComparison.OrdinalIgnoreCase)
         || string.Equals(className, "WorkerW", StringComparison.OrdinalIgnoreCase)
@@ -408,7 +645,7 @@ public class WindowHookManager : IDisposable
         || string.Equals(className, "Shell_SecondaryTrayWnd", StringComparison.OrdinalIgnoreCase)
         || string.Equals(className, "TrayNotifyWnd", StringComparison.OrdinalIgnoreCase);
 
-    private bool IsWindowAlreadyPlacedOnTarget(IntPtr hwnd, RECT rect, int width, int height, int newX, int newY, bool wasMaximized)
+    private bool IsWindowAlreadyPlacedOnTarget(IntPtr hwnd, RECT rect, int newX, int newY, bool wasMaximized)
     {
         const int tol = 12;
 
@@ -418,11 +655,9 @@ public class WindowHookManager : IDisposable
             return hMon != IntPtr.Zero && MonitorDeviceNameEqualsScreen(hMon, _targetMonitor);
         }
 
-        // Restored / normal windows: skip if we'd move to the same position (within tolerance).
         if (Math.Abs(rect.Left - newX) <= tol && Math.Abs(rect.Top - newY) <= tol)
             return true;
 
-        // Borderless fullscreen (often not "zoomed"): bounds match target monitor.
         if (RectMatchesScreenBounds(rect, _targetMonitor.Bounds, tol))
             return true;
 
@@ -509,18 +744,17 @@ public class WindowHookManager : IDisposable
         }
         catch
         {
-            // ignore
         }
 
         return false;
     }
 
-    /// <summary>Reloads disk config and recomputes kiosk + target monitors (timer path).</summary>
     private void SynchronizeRoutingLayout()
     {
         try
         {
             _config = ConfigManager.LoadConfig();
+            _forceRouteProcessNames = BuildForceRouteProcessNames(_config);
         }
         catch (Exception ex)
         {
@@ -557,7 +791,6 @@ public class WindowHookManager : IDisposable
         }
     }
 
-    /// <summary>Often enough for WinEvents: browser moved without needing a disk read.</summary>
     private void RefreshLayoutFromRunningBrowserOnly()
     {
         try
@@ -604,7 +837,6 @@ public class WindowHookManager : IDisposable
                ?? npsMonitor;
     }
 
-    // Windows API declarations
     private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
 
@@ -619,6 +851,12 @@ public class WindowHookManager : IDisposable
 
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int nIndex);
@@ -635,6 +873,9 @@ public class WindowHookManager : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y,
         int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
@@ -654,6 +895,33 @@ public class WindowHookManager : IDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextLengthW(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
     {
@@ -668,12 +936,19 @@ public class WindowHookManager : IDisposable
     private const uint WS_CAPTION = 0x00C00000;
     private const uint WS_EX_TOOLWINDOW = 0x00000080;
     private const uint WS_EX_APPWINDOW = 0x00040000;
+    private const uint WS_EX_TOPMOST = 0x00000008;
     private const uint SWP_NOZORDER = 0x0004;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_NOSIZE = 0x0001;
+    private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
     private const int SW_RESTORE = 9;
     private const int SW_MAXIMIZE = 3;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
+    private const uint GA_ROOT = 2;
+    private const int ASFW_ANY = -1;
+    private static readonly IntPtr HWND_TOPMOST = new(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new(-2);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
     private struct MONITORINFOEX

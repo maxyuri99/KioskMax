@@ -29,9 +29,9 @@ public partial class ControllerForm : Form
         chkRouter.Checked = _config.RouterEnabled;
 
         cmbRouterFilter.Items.AddRange(new object[] { "Strict", "Relaxed" });
-        var filterMode = string.Equals(_config.RouterWindowFilterMode, "Relaxed", StringComparison.OrdinalIgnoreCase)
-            ? "Relaxed"
-            : "Strict";
+        var filterMode = string.Equals(_config.RouterWindowFilterMode, "Strict", StringComparison.OrdinalIgnoreCase)
+            ? "Strict"
+            : "Relaxed";
         cmbRouterFilter.SelectedItem = filterMode;
         cmbRouterFilter.SelectedIndexChanged += cmbRouterFilter_SelectedIndexChanged;
 

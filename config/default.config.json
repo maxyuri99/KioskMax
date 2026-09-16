@@ -9,6 +9,9 @@
   "dpiMode": "PerMonitorV2",
   "routerEnabled": true,
   "routerTarget": "Opposite",
+  "routerWindowFilterMode": "Relaxed",
+  "routerForceProcessNames": [],
+  "routerMinVisibleArea": 400,
+  "routerDebugLogging": false,
   "logLevel": "Information"
 }
-

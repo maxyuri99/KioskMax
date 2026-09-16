@@ -2,14 +2,14 @@ param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
     [string]$OutputDir = "build/publish",
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.3.0",
     [string]$InnoSetupPath
 )
 
 $ErrorActionPreference = "Stop"
 
 # 1) Publish portable bundle first
-powershell -ExecutionPolicy Bypass -File "$PSScriptRoot\\publish-bundle.ps1" -Configuration $Configuration -Runtime $Runtime
+powershell -ExecutionPolicy Bypass -File "$PSScriptRoot\\publish-bundle.ps1" -Configuration $Configuration -Runtime $Runtime -Version $Version
 
 # 2) Compile installer using Inno Setup
 if (-not $InnoSetupPath) {
