@@ -43,6 +43,7 @@ public class NpsConfig
     public KioskContexto? KioskContexto { get; set; }
     public bool TefAtivo { get; set; } = true;
     public int UltimaVersaoConfig { get; set; }
+    public string SenhaLocalHash { get; set; } = string.Empty;
     public string UltimaSituacao { get; set; } = string.Empty;
     public string TelaLocal { get; set; } = string.Empty;
     public bool GestaoExibir { get; set; } = true;

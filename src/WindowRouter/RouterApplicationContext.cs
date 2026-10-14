@@ -1,3 +1,4 @@
+using NpsShared.Utilities;
 using System.Runtime.InteropServices;
 using NpsShared.Configuration;
 using NpsShared.Models;
@@ -46,7 +47,7 @@ public class RouterApplicationContext : ApplicationContext
 
         contextMenu.Items.Add(new ToolStripSeparator());
 
-        _pauseMenuItem = new ToolStripMenuItem("Pausar roteamento", null, (_, _) => ToggleRoutingPaused());
+        _pauseMenuItem = new ToolStripMenuItem("Pausar roteamento", null, (_, _) => { if (SenhaLocal.Solicitar(null, "pausar ou retomar o roteador")) ToggleRoutingPaused(); });
         contextMenu.Items.Add(_pauseMenuItem);
 
         contextMenu.Items.Add(new ToolStripSeparator());
@@ -132,6 +133,7 @@ public class RouterApplicationContext : ApplicationContext
 
     private void Exit_Click(object? sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(null, "fechar o roteador de janelas")) return;
         Log.Information("Saida solicitada");
         UnregisterPauseHotkeyInternal();
         _hookManager?.Stop();
@@ -195,7 +197,8 @@ public class RouterApplicationContext : ApplicationContext
         {
             if (m.Msg == WmHotkey && m.WParam.ToInt32() == RouterPauseHotkeyId)
             {
-                _ctx.ToggleRoutingPaused();
+                if (SenhaLocal.Solicitar(null, "pausar ou retomar o roteador"))
+                    _ctx.ToggleRoutingPaused();
             }
             base.WndProc(ref m);
         }

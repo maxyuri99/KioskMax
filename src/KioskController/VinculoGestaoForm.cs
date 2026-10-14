@@ -1,3 +1,4 @@
+using NpsShared.Utilities;
 using NpsShared.Configuration;
 
 namespace KioskController;
@@ -62,6 +63,7 @@ public sealed class VinculoGestaoForm : Form
 
     private void BtnSalvar_Click(object? sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "alterar o endereço do Gestão")) return;
         var url = _txtUrl.Text.Trim().TrimEnd('/');
         if (url.Length > 0 && !(Uri.TryCreate(url, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)))
         {

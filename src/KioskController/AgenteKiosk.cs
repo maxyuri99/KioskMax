@@ -81,6 +81,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         Tela.Evento += (tipo, detalhe) => Enfileirar(tipo, detalhe);
         Tela.SaiuInesperadamente += AoTelaSairInesperadamente;
+        SenhaLocal.Registro += (evento, acao) => Enfileirar(evento, acao);
     }
 
     public void Iniciar()
@@ -266,6 +267,11 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         if (dados.TryGetProperty("cdKiosk", out var cd) && cd.ValueKind == JsonValueKind.Number) CdKiosk = cd.GetInt32();
         NomeKiosk = LerTexto(dados, "nmKiosk");
+
+        if (string.Equals(situacao, "ATIVO", StringComparison.OrdinalIgnoreCase))
+        {
+            AplicarSenhaLocal(LerTexto(dados, "senhaLocal"));
+        }
 
         try
         {
@@ -694,6 +700,17 @@ public sealed class AgenteKiosk : IAsyncDisposable
     {
         var nome = evento.StartsWith("TEF_", StringComparison.OrdinalIgnoreCase) ? evento : "TEF_" + evento;
         Enfileirar(nome, detalhe);
+    }
+
+    private void AplicarSenhaLocal(string hash)
+    {
+        var novo = SenhaLocal.FormatoValido(hash) ? hash : string.Empty;
+        var atual = ConfigManager.LoadConfig().SenhaLocalHash ?? string.Empty;
+        if (string.Equals(novo, atual, StringComparison.Ordinal)) return;
+        ConfigManager.Update(c => c.SenhaLocalHash = novo);
+        SenhaLocal.Bloquear();
+        Enfileirar("SENHA_LOCAL_ATUALIZADA", string.IsNullOrEmpty(novo) ? "Senha padrão" : "Senha definida pelo Gestão");
+        Log.Information("Senha local do kiosk atualizada pelo Gestão");
     }
 
     public void Enfileirar(string evento, string detalhe)

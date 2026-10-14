@@ -27,6 +27,14 @@ public partial class ControllerForm : Form
 
         _config = ConfigManager.LoadConfig();
 
+        var travaLocal = new System.Windows.Forms.Timer { Interval = 1000 };
+        travaLocal.Tick += (_, _) =>
+        {
+            if (Visible && !SenhaLocal.Liberado) Hide();
+        };
+        travaLocal.Start();
+        FormClosed += (_, _) => travaLocal.Dispose();
+
         txtUrl.Text = _config.NpsUrl;
         chkRouter.Checked = _config.RouterEnabled;
 
@@ -139,11 +147,13 @@ public partial class ControllerForm : Form
 
     private void btnOpenConfig_Click(object sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "abrir a pasta de configuração")) return;
         ConfigManager.OpenConfigDirectory();
     }
 
     private async void btnStartStop_Click(object sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "iniciar ou parar a tela")) return;
         try
         {
             UseWaitCursor = true;
@@ -206,6 +216,7 @@ public partial class ControllerForm : Form
 
     private async void btnApplyUrl_Click(object sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "trocar o endereço da tela")) return;
         try
         {
             UseWaitCursor = true;

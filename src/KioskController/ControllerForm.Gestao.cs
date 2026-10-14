@@ -1,3 +1,4 @@
+using NpsShared.Utilities;
 using KioskTef;
 using NpsShared.Configuration;
 using Serilog;
@@ -126,6 +127,7 @@ public partial class ControllerForm
 
     private void BtnSalvarGestaoUrl_Click(object? sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "alterar o endereço do Gestão")) return;
         var url = _txtGestaoUrl.Text.Trim().TrimEnd('/');
         if (url.Length > 0 && !(Uri.TryCreate(url, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)))
         {
@@ -151,6 +153,7 @@ public partial class ControllerForm
 
     private void BtnSalvarImpressao_Click(object? sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "alterar a impressão do TEF")) return;
         try
         {
             var config = new ConfiguracaoImpressao
@@ -174,6 +177,7 @@ public partial class ControllerForm
 
     private async void BtnImprimirTeste_Click(object? sender, EventArgs e)
     {
+        if (!SenhaLocal.Solicitar(this, "imprimir o teste do TEF")) return;
         try
         {
             await Task.Run(() => _agente.Tef.ImprimirTeste());

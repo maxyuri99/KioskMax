@@ -63,8 +63,6 @@ public class TrayApplicationContext : ApplicationContext
 
 		Log.Information("Tray application initialized");
 
-		// Open controller window on startup so the user sees controls
-		ShowController();
 
 		// Ensure cleanup on app exit and session end
 		Application.ApplicationExit += (_, __) =>
@@ -181,6 +179,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private async void UsePrimaryMonitor_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "usar o monitor principal")) return;
 		try
 		{
 			AvisarControleGestao();
@@ -316,6 +315,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void Vinculo_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "alterar o vínculo com o Gestão")) return;
 		try
 		{
 			using var dialogo = new VinculoGestaoForm(_agente);
@@ -329,6 +329,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private async void ImprimirTesteTef_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "imprimir o teste do TEF")) return;
 		try
 		{
 			await Task.Run(() => _agente.Tef.ImprimirTeste());
@@ -407,6 +408,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private async void StartStopDisplay_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "iniciar ou parar a tela")) return;
 		try
 		{
 			Log.Information("Start/Stop clicked by user");
@@ -504,6 +506,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private async void ChangeUrl_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "trocar o endereço da tela")) return;
 		try
 		{
 			AvisarControleGestao();
@@ -546,6 +549,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private async Task SetMonitor_Click(int monitorIndex)
 	{
+		if (!SenhaLocal.Solicitar(null, "trocar o monitor")) return;
 		try
 		{
 			AvisarControleGestao();
@@ -585,6 +589,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void ToggleRouter_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "ligar ou desligar o roteador de janelas")) return;
 		AvisarControleGestao();
 		SetBusy(true, _config.RouterEnabled ? "Stopping Router..." : "Starting Router...");
 		var novoRoteador = !_config.RouterEnabled;
@@ -636,6 +641,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void ShowController()
 	{
+		if (!SenhaLocal.Solicitar(null, "abrir o controle do kiosk")) return;
 		try
 		{
 			if (_controllerForm == null || _controllerForm.IsDisposed)
@@ -655,6 +661,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void OpenConfig_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "abrir a pasta de configuração")) return;
 		ConfigManager.OpenConfigDirectory();
 	}
 
@@ -678,6 +685,7 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void Exit_Click(object? sender, EventArgs e)
 	{
+		if (!SenhaLocal.Solicitar(null, "fechar o KioskMax")) return;
 		Log.Information("Exit requested by user");
 		BeginCleanupAndExit();
 	}
@@ -852,7 +860,7 @@ public class TrayApplicationContext : ApplicationContext
 			Log.Information("Global hotkey received: {Id}", args.HotkeyId);
 			if (args.HotkeyId == 1)
 				ShowController();
-			else if (args.HotkeyId == 2)
+			else if (args.HotkeyId == 2 && SenhaLocal.Solicitar(null, "alternar a tela sempre visível"))
 				_ = Task.Run(async () =>
 				{
 					try { await IpcClient.ToggleTopMostAsync(); } catch (Exception ex) { Log.Warning(ex, "ToggleTopMost from hotkey failed"); }
