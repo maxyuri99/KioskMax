@@ -13,5 +13,8 @@
   "routerForceProcessNames": [],
   "routerMinVisibleArea": 400,
   "routerDebugLogging": false,
-  "logLevel": "Information"
+  "logLevel": "Information",
+  "gestaoApiUrl": "",
+  "kioskIdentificador": "",
+  "tefAtivo": true
 }

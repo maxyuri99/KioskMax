@@ -118,5 +118,32 @@ public class IpcClient
     {
         return await SendCommandAsync(new IpcCommand(IpcCommandType.GetStatus));
     }
-}
 
+    public static async Task<IpcResponse> SetKioskContextAsync(string json)
+    {
+        return await SendCommandAsync(new IpcCommand(IpcCommandType.SetKioskContext, new Dictionary<string, string>
+        {
+            { "json", json }
+        }));
+    }
+
+    public static async Task<IpcResponse> NavigateLocalAsync(string tipo, string nome, string identificador, string? mensagem = null)
+    {
+        var parametros = new Dictionary<string, string>
+        {
+            { "tipo", tipo },
+            { "nome", nome },
+            { "identificador", identificador }
+        };
+        if (!string.IsNullOrWhiteSpace(mensagem)) parametros["mensagem"] = mensagem;
+        return await SendCommandAsync(new IpcCommand(IpcCommandType.NavigateLocal, parametros));
+    }
+
+    public static async Task<IpcResponse> PostToPageAsync(string json)
+    {
+        return await SendCommandAsync(new IpcCommand(IpcCommandType.PostToPage, new Dictionary<string, string>
+        {
+            { "json", json }
+        }));
+    }
+}

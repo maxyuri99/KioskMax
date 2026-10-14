@@ -2,7 +2,7 @@ param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
     [string]$OutputDir = "build/publish",
-    [string]$Version = "1.3.0",
+    [string]$Version = "2.0.0",
     [switch]$Zip
 )
 

@@ -12,9 +12,11 @@ public partial class ControllerForm : Form
     private readonly System.Windows.Forms.Timer _statusTimer;
     private NpsConfig _config;
     private bool _lastIsDisplayRunning;
+    private readonly AgenteKiosk _agente;
 
-    public ControllerForm()
+    public ControllerForm(AgenteKiosk agente)
     {
+        _agente = agente;
         InitializeComponent();
 
         try
@@ -39,6 +41,7 @@ public partial class ControllerForm : Form
         chkRouterDebugLogging.CheckedChanged += chkRouterDebugLogging_CheckedChanged;
 
         PopulateMonitors();
+        InitializeGestaoGroup();
 
         _statusTimer = new System.Windows.Forms.Timer
         {
@@ -48,6 +51,7 @@ public partial class ControllerForm : Form
         _statusTimer.Start();
 
         Shown += async (_, _) => await UpdateStatusAsync();
+        FormClosed += (_, _) => _statusTimer.Dispose();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -97,6 +101,7 @@ public partial class ControllerForm : Form
             _lastIsDisplayRunning = isRunning;
             lblStatus.Text = isRunning ? "Status: ✓ Running" : "Status: ✗ Stopped";
             btnStartStop.Text = isRunning ? "Stop" : "Start";
+            AtualizarGestao();
         }
         catch
         {
@@ -147,18 +152,16 @@ public partial class ControllerForm : Form
             var isRunning = await IpcClient.IsDisplayRunningAsync();
             if (isRunning)
             {
-                var result = await IpcClient.ShutdownAsync();
-                if (!result.Success)
-                {
-                    MessageBox.Show($"Shutdown failed: {result.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-
-                WindowRouterLifecycle.StopRoutingProcesses();
+                await _agente.Tela.PararAsync();
             }
             else
             {
-                StartDisplayProcess();
-                WindowRouterLifecycle.TryLaunchRouterIfEnabled(out _);
+                var ok = await _agente.Tela.IniciarAsync();
+                if (!ok)
+                {
+                    MessageBox.Show($"KioskBrowser.exe could not be started.\nExpected at:\n{GerenciadorTela.ResolverCaminhoExe()}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
 
             await Task.Delay(800);
@@ -224,14 +227,20 @@ public partial class ControllerForm : Form
                 }
                 else
                 {
-                    _config.NpsUrl = newUrl;
-                    ConfigManager.SaveConfig(_config);
+                    _config = ConfigManager.Update(c =>
+                    {
+                        c.NpsUrl = newUrl;
+                        c.TelaLocal = string.Empty;
+                    });
                 }
             }
             else
             {
-                _config.NpsUrl = newUrl;
-                ConfigManager.SaveConfig(_config);
+                _config = ConfigManager.Update(c =>
+                {
+                    c.NpsUrl = newUrl;
+                    c.TelaLocal = string.Empty;
+                });
             }
         }
         catch (Exception ex)
@@ -264,17 +273,23 @@ public partial class ControllerForm : Form
                 }
                 else
                 {
-                    _config.MonitorPolicy = "Explicit";
-                    _config.MonitorIndex = index;
-                    ConfigManager.SaveConfig(_config);
+                    _config = ConfigManager.Update(c =>
+                    {
+                        c.MonitorPolicy = "Explicit";
+                        c.MonitorIndex = index;
+                        c.MonitorDeviceId = string.Empty;
+                    });
                 }
             }
             else
             {
                 // Persist locally for próxima inicialização do Display
-                _config.MonitorPolicy = "Explicit";
-                _config.MonitorIndex = index;
-                ConfigManager.SaveConfig(_config);
+                _config = ConfigManager.Update(c =>
+                {
+                    c.MonitorPolicy = "Explicit";
+                    c.MonitorIndex = index;
+                    c.MonitorDeviceId = string.Empty;
+                });
                 await UpdateStatusAsync();
             }
         }
@@ -291,8 +306,8 @@ public partial class ControllerForm : Form
 
     private void chkRouter_CheckedChanged(object sender, EventArgs e)
     {
-        _config.RouterEnabled = chkRouter.Checked;
-        ConfigManager.SaveConfig(_config);
+        var habilitado = chkRouter.Checked;
+        _config = ConfigManager.Update(c => c.RouterEnabled = habilitado);
     }
 
     private void cmbRouterFilter_SelectedIndexChanged(object? sender, EventArgs e)
@@ -301,121 +316,12 @@ public partial class ControllerForm : Form
         if (string.IsNullOrEmpty(item))
             return;
 
-        _config.RouterWindowFilterMode = item;
-        ConfigManager.SaveConfig(_config);
+        _config = ConfigManager.Update(c => c.RouterWindowFilterMode = item);
     }
 
     private void chkRouterDebugLogging_CheckedChanged(object? sender, EventArgs e)
     {
-        _config.RouterDebugLogging = chkRouterDebugLogging.Checked;
-        ConfigManager.SaveConfig(_config);
-    }
-
-    private void StartDisplayProcess()
-    {
-        var exePath = GetDisplayExecutablePath();
-        if (!File.Exists(exePath))
-        {
-            MessageBox.Show($"KioskBrowser.exe not found at:\n{exePath}\n\nPlease ensure it's in the same directory.",
-                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        try
-        {
-            Log.Information("Controller Start: resolved KioskBrowser path: {Path}", exePath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = exePath,
-                UseShellExecute = false,
-                WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppDomain.CurrentDomain.BaseDirectory
-            });
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Controller failed to start display");
-            MessageBox.Show($"Failed to start display: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private static string GetDisplayExecutablePath()
-    {
-        var runtimeBase = AppDomain.CurrentDomain.BaseDirectory;
-        var exePath = Process.GetCurrentProcess().MainModule?.FileName ?? runtimeBase;
-        var exeDir = Path.GetDirectoryName(exePath) ?? runtimeBase;
-
-        var sameDirPath = Path.Combine(exeDir, "KioskBrowser.exe");
-        if (File.Exists(sameDirPath)) return sameDirPath;
-
-        // Build a comprehensive set of roots by walking up several parents
-        var rootsToSearch = new List<string>();
-        void AddAncestors(string start)
-        {
-            try
-            {
-                var current = new DirectoryInfo(start);
-                for (int i = 0; i < 8 && current != null; i++)
-                {
-                    rootsToSearch.Add(current.FullName);
-                    current = current.Parent;
-                }
-            }
-            catch { }
-        }
-
-        AddAncestors(exeDir);
-        AddAncestors(runtimeBase);
-
-        // Try common dev and temp-run layouts under each root
-        foreach (var root in rootsToSearch.Distinct())
-        {
-            // new layouts
-            var k1 = Path.Combine(root, "KioskBrowser", "KioskBrowser.exe");
-            if (File.Exists(k1)) return k1;
-
-            var k2 = Path.Combine(root, "src", "KioskBrowser", "bin", "Debug", "net8.0-windows", "KioskBrowser.exe");
-            if (File.Exists(k2)) return k2;
-
-            var k3 = Path.Combine(root, "KioskBrowser", "bin", "Debug", "net8.0-windows", "KioskBrowser.exe");
-            if (File.Exists(k3)) return k3;
-
-            var k4 = Path.Combine(root, "KioskBrowser", "net8.0-windows", "KioskBrowser.exe");
-            if (File.Exists(k4)) return k4;
-
-            // legacy layouts
-            var n1 = Path.Combine(root, "NpsDisplay", "NpsDisplay.exe");
-            if (File.Exists(n1)) return n1;
-
-            var n2 = Path.Combine(root, "src", "NpsDisplay", "bin", "Debug", "net8.0-windows", "NpsDisplay.exe");
-            if (File.Exists(n2)) return n2;
-
-            var n3 = Path.Combine(root, "NpsDisplay", "bin", "Debug", "net8.0-windows", "NpsDisplay.exe");
-            if (File.Exists(n3)) return n3;
-
-            var n4 = Path.Combine(root, "NpsDisplay", "net8.0-windows", "NpsDisplay.exe");
-            if (File.Exists(n4)) return n4;
-
-            // broad search fallback (limited to each root subtree)
-            try
-            {
-                var found = Directory.EnumerateFiles(root, "KioskBrowser.exe", SearchOption.AllDirectories)
-                    .OrderByDescending(p => p.Contains("net8.0-windows"))
-                    .FirstOrDefault();
-                if (!string.IsNullOrEmpty(found)) return found!;
-            }
-            catch { }
-            try
-            {
-                var legacy = Directory.EnumerateFiles(root, "NpsDisplay.exe", SearchOption.AllDirectories)
-                    .OrderByDescending(p => p.Contains("net8.0-windows"))
-                    .FirstOrDefault();
-                if (!string.IsNullOrEmpty(legacy)) return legacy!;
-            }
-            catch { }
-        }
-
-        return sameDirPath;
+        var depuracao = chkRouterDebugLogging.Checked;
+        _config = ConfigManager.Update(c => c.RouterDebugLogging = depuracao);
     }
 }
-
-

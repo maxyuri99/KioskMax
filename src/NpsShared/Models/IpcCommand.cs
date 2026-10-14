@@ -11,7 +11,10 @@ public enum IpcCommandType
     SetMonitor,
     ToggleTopMost,
     Shutdown,
-    GetStatus
+    GetStatus,
+    SetKioskContext,
+    NavigateLocal,
+    PostToPage
 }
 
 /// <summary>

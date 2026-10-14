@@ -1,6 +1,6 @@
 # NPS Kiosk (KioskMax)
 
-Uma solução Windows para exibir pesquisas NPS em modo kiosque com controle pela bandeja do sistema.
+Agente Windows do Kiosk UP+: exibe a tela do cliente (frente de caixa) em modo kiosque, é controlado pelo Gestão (banco de dados) e hospeda o serviço TEF (substitui o TEFManager Delphi na porta 8069).
 
 Repositório: https://github.com/maxyuri99/KioskMax
 
@@ -16,10 +16,28 @@ Repositório: https://github.com/maxyuri99/KioskMax
 - Atalhos globais: Ctrl+Alt+K/H para abrir o Controller
 - Display oculto na barra de tarefas
 
+## Arquitetura v2 (controle pelo Gestão + TEF)
+
+- O `KioskController` é o agente: a cada ~5 s envia o sinal ao Gestão (`POST {gestaoApiUrl}/kiosk/dispositivo/sinal`), aplica a configuração quando `nuVersaoConfig` ou a situação mudam e executa os comandos da fila (`RECARREGAR`, `REINICIAR_TELA`, `LIMPAR_CACHE`, `REINICIAR_ROTEADOR`, `REINICIAR_TEF`, `IMPRIMIR_TESTE_TEF`, `REINICIAR_AGENTE`). Contrato completo em `frontUpMais-docs/kiosk-contrato.md`.
+- Primeira execução: o agente gera o identificador (GUID) e se registra; o kiosk fica `PENDENTE` até ser aprovado no Gestão. O token é guardado em `kiosk.token` (DPAPI, escopo máquina) na pasta de configuração.
+- Telas locais (geradas pelo KioskBrowser, fundo azul `#243d92`): `AGUARDANDO` (pendente), `BLOQUEADO` e `SEM_TELA` (ativo sem caixa/tela).
+- Com a situação `ATIVO` o banco manda: caixa/tela (URL), exibir, monitor, sempre visível, roteador, TEF e impressão. Sem rede o agente continua com a última configuração aplicada (backoff 5→10→20→30 s).
+- O KioskBrowser injeta `window.upKiosk` antes de qualquer script da página, recebe `{tipo:'ESTADO'}` da página (devolvido ao Gestão em `tela.pagina`) e aceita `{tipo:'RECARREGAR'}` / `{tipo:'KIOSK'}` do agente.
+- TEF (`src/KioskTef`, hospedado no Controller): servidor HTTP em `localhost:8069` (`/tef/teste`, `/pagar`, `/consultar`, `/imprimir`), mesma pasta `%APPDATA%\TEFManagerUP` do Delphi. A impressão usa a configuração do banco quando o kiosk está `ATIVO`; caso contrário, o INI `%APPDATA%\TEFManagerUP\TEFManager.ini`.
+- Sem `gestaoApiUrl` o comportamento é o antigo (somente local); o TEF sobe se `tefAtivo`.
+- Menu da bandeja e Controller: status "Gestão" e "TEF", "Vínculo com o Gestão..." (URL, identificador, situação), "Imprimir teste TEF" e grupo "Gestão / TEF" (impressora editável só quando o kiosk não é controlado pelo Gestão).
+
+Campos novos do `config.json`: `gestaoApiUrl` (vazio = modo local), `kioskIdentificador` (gerado), `kioskContexto` (último `upKiosk`), `tefAtivo` (padrão `true`), além de controle interno (`ultimaVersaoConfig`, `ultimaSituacao`, `telaLocal`, `gestaoExibir`, `tefGestao`).
+
+Instalador: `KioskMaxSetup_2.0.0.exe /GESTAOURL=https://.../api` grava `gestaoApiUrl` no `config.json` na instalação.
+
+Os executáveis do Controller ficam grandes (~190 MB single-file) porque o TEF usa ASP.NET Core embutido.
+
 ## Componentes
 
 - Display: `src/KioskBrowser` (WinForms + WebView2)
-- Controller (bandeja): `src/KioskController`
+- Controller / agente (bandeja): `src/KioskController`
+- TEF: `src/KioskTef`
 - WindowRouter: `src/WindowRouter`
 - Watchdog: `src/NpsWatchdog`
 - Biblioteca compartilhada: `src/NpsShared`
@@ -70,11 +88,11 @@ Pré‑requisito: Inno Setup 6 (ISCC). Se o instalador do Inno Setup estiver em 
 
 ```powershell
 # Construir instalador (gera também o bundle antes)
-powershell -ExecutionPolicy Bypass -File build/scripts/build-installer.ps1 -Configuration Release -Runtime win-x64 -Version 1.0.0
+powershell -ExecutionPolicy Bypass -File build/scripts/build-installer.ps1 -Configuration Release -Runtime win-x64 -Version 2.0.0
 
 # Saída
 build/publish/installer/
-  KioskMaxSetup_1.0.0.exe
+  KioskMaxSetup_2.0.0.exe
 ```
 
 Dica: Coloque um ícone `app.ico` na pasta `icones/` para o instalador e atalhos usarem o ícone do KioskMax.

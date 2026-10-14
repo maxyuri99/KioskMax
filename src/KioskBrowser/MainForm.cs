@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using NpsShared.Configuration;
@@ -20,6 +22,16 @@ public partial class MainForm : Form
     private bool _isInitialized;
     private int _secretClickCount;
     private DateTime _secretClickWindowStart;
+    private string? _kioskScriptId;
+    private string _paginaJson = string.Empty;
+    private bool _carregada;
+    private string _telaLocalAtual = string.Empty;
+
+    private static readonly JsonSerializerOptions JsonCamelCase = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
 
     public MainForm()
     {
@@ -28,7 +40,7 @@ public partial class MainForm : Form
         _config = ConfigManager.LoadConfig();
         _resilienceTimer = new System.Windows.Forms.Timer();
         _targetScreen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
-        
+
         InitializeForm();
         InitializeWebView();
         InitializeIpc();
@@ -42,18 +54,18 @@ public partial class MainForm : Form
         this.WindowState = FormWindowState.Normal; // Set to normal first
         this.TopMost = _config.TopMost;
         this.ShowInTaskbar = false;
-        
+
         // Determine target screen
         _targetScreen = DetermineTargetScreen();
-        
+
         // Set bounds to target screen
         this.StartPosition = FormStartPosition.Manual;
         this.Bounds = _targetScreen.Bounds;
-        
+
         // Setup WebView2 container
         _webView.Dock = DockStyle.Fill;
         this.Controls.Add(_webView);
-        
+
         this.Text = "Kiosk Browser";
         try
         {
@@ -61,7 +73,7 @@ public partial class MainForm : Form
         }
         catch { }
         this.BackColor = Color.Black;
-        
+
         Log.Information("Form initialized on monitor: {Monitor} ({Bounds})", 
             _targetScreen.DeviceName, _targetScreen.Bounds);
     }
@@ -69,12 +81,12 @@ public partial class MainForm : Form
     private Screen DetermineTargetScreen()
     {
         var screens = Screen.AllScreens;
-        
+
         if (_config.MonitorPolicy == "Primary")
         {
             return Screen.PrimaryScreen ?? screens[0];
         }
-        
+
         // Explicit mode - try device ID first, then index
         if (!string.IsNullOrEmpty(_config.MonitorDeviceId))
         {
@@ -85,13 +97,13 @@ public partial class MainForm : Form
                 return screenByDevice;
             }
         }
-        
+
         // Fall back to index
         if (_config.MonitorIndex >= 0 && _config.MonitorIndex < screens.Length)
         {
             return screens[_config.MonitorIndex];
         }
-        
+
         // Default to primary
         return Screen.PrimaryScreen ?? screens[0];
     }
@@ -106,9 +118,9 @@ public partial class MainForm : Form
             Directory.CreateDirectory(userDataFolder);
 
             var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
-            
+
             await _webView.EnsureCoreWebView2Async(env);
-            
+
             _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
             _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
@@ -132,17 +144,92 @@ public partial class MainForm : Form
                     Log.Error(ex, "Error handling WebView2 ProcessFailed");
                 }
             };
-            
-            _webView.CoreWebView2.Navigate(_config.NpsUrl);
+
+            _webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
+            _webView.CoreWebView2.NavigationStarting += (s, e) =>
+            {
+                _carregada = false;
+                _paginaJson = string.Empty;
+            };
+            _webView.CoreWebView2.NavigationCompleted += (s, e) =>
+            {
+                _carregada = e.IsSuccess;
+                if (!e.IsSuccess)
+                {
+                    Log.Warning("Navigation failed: {Status}", e.WebErrorStatus);
+                }
+            };
+
+            await RegisterKioskScriptAsync();
+
+            if (PaginasLocais.EhTipoValido(_config.TelaLocal))
+            {
+                NavigateLocalPage(_config.TelaLocal, null, null, null);
+                Log.Information("WebView2 initialized with local page: {Tipo}", _config.TelaLocal);
+            }
+            else
+            {
+                _telaLocalAtual = string.Empty;
+                _webView.CoreWebView2.Navigate(_config.NpsUrl);
+                Log.Information("WebView2 initialized and navigated to: {Url}", _config.NpsUrl);
+            }
             _isInitialized = true;
-            
-            Log.Information("WebView2 initialized and navigated to: {Url}", _config.NpsUrl);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Failed to initialize WebView2");
             MessageBox.Show($"Failed to initialize browser: {ex.Message}", "Error", 
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async Task RegisterKioskScriptAsync()
+    {
+        var core = _webView.CoreWebView2;
+        if (core == null) return;
+
+        if (_kioskScriptId != null)
+        {
+            try { core.RemoveScriptToExecuteOnDocumentCreated(_kioskScriptId); } catch { }
+            _kioskScriptId = null;
+        }
+
+        if (_config.KioskContexto == null) return;
+
+        var json = JsonSerializer.Serialize(_config.KioskContexto, JsonCamelCase);
+        _kioskScriptId = await core.AddScriptToExecuteOnDocumentCreatedAsync($"window.upKiosk = {json};");
+    }
+
+    private void NavigateLocalPage(string tipo, string? nome, string? identificador, string? mensagem)
+    {
+        var core = _webView.CoreWebView2;
+        if (core == null) return;
+
+        var nomeKiosk = !string.IsNullOrWhiteSpace(nome)
+            ? nome!
+            : (!string.IsNullOrWhiteSpace(_config.KioskContexto?.NmKiosk) ? _config.KioskContexto!.NmKiosk : Environment.MachineName);
+        var id = !string.IsNullOrWhiteSpace(identificador) ? identificador! : _config.KioskIdentificador;
+
+        _telaLocalAtual = tipo;
+        core.NavigateToString(PaginasLocais.Renderizar(tipo, nomeKiosk, id, mensagem));
+    }
+
+    private void CoreWebView2_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            var node = JsonNode.Parse(e.WebMessageAsJson) as JsonObject;
+            if (node == null) return;
+            var tipo = node["tipo"]?.GetValue<string>();
+            if (!string.Equals(tipo, "ESTADO", StringComparison.OrdinalIgnoreCase)) return;
+
+            node.Remove("tipo");
+            node["em"] = DateTimeOffset.Now.ToString("o");
+            _paginaJson = node.ToJsonString();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Invalid web message ignored");
         }
     }
 
@@ -236,19 +323,25 @@ public partial class MainForm : Form
             return command.CommandType switch
             {
                 IpcCommandType.Ping => new IpcResponse(true, "Pong"),
-                
+
                 IpcCommandType.Reload => await HandleReloadCommand(),
-                
+
                 IpcCommandType.SetUrl => await HandleSetUrlCommand(command),
-                
+
                 IpcCommandType.SetMonitor => HandleSetMonitorCommand(command),
-                
+
                 IpcCommandType.ToggleTopMost => HandleToggleTopMostCommand(),
-                
+
                 IpcCommandType.Shutdown => HandleShutdownCommand(),
-                
+
                 IpcCommandType.GetStatus => HandleGetStatusCommand(),
-                
+
+                IpcCommandType.SetKioskContext => await HandleSetKioskContextCommand(command),
+
+                IpcCommandType.NavigateLocal => HandleNavigateLocalCommand(command),
+
+                IpcCommandType.PostToPage => HandlePostToPageCommand(command),
+
                 _ => new IpcResponse(false, "Unknown command")
             };
         }
@@ -300,9 +393,15 @@ public partial class MainForm : Form
                 hasCore = core != null;
                 if (core != null)
                 {
+                    _telaLocalAtual = string.Empty;
                     core.Navigate(url);
                     _config.NpsUrl = url;
-                    ConfigManager.SaveConfig(_config);
+                    _config.TelaLocal = string.Empty;
+                    ConfigManager.Update(c =>
+                    {
+                        c.NpsUrl = url;
+                        c.TelaLocal = string.Empty;
+                    });
                 }
             });
         }
@@ -335,7 +434,7 @@ public partial class MainForm : Form
             _targetScreen = screens[monitorIndex];
             this.Bounds = _targetScreen.Bounds;
             _config.MonitorIndex = monitorIndex;
-            ConfigManager.SaveConfig(_config);
+            ConfigManager.Update(c => c.MonitorIndex = monitorIndex);
             Log.Information("Switched to monitor {Index}: {Device}", monitorIndex, _targetScreen.DeviceName);
         });
 
@@ -348,10 +447,107 @@ public partial class MainForm : Form
         {
             this.TopMost = !this.TopMost;
             _config.TopMost = this.TopMost;
-            ConfigManager.SaveConfig(_config);
+            ConfigManager.Update(c => c.TopMost = _config.TopMost);
         });
 
         return new IpcResponse(true, $"TopMost: {this.TopMost}");
+    }
+
+    private async Task<IpcResponse> HandleSetKioskContextCommand(IpcCommand command)
+    {
+        if (!command.Parameters.TryGetValue("json", out var json) || string.IsNullOrWhiteSpace(json))
+        {
+            return new IpcResponse(false, "Missing 'json' parameter");
+        }
+
+        var contexto = JsonSerializer.Deserialize<KioskContexto>(json, JsonCamelCase);
+        if (contexto == null)
+        {
+            return new IpcResponse(false, "Invalid kiosk context");
+        }
+
+        var tcs = new TaskCompletionSource<IpcResponse>();
+        BeginInvoke(new Action(async () =>
+        {
+            try
+            {
+                _config.KioskContexto = contexto;
+                await RegisterKioskScriptAsync();
+
+                var core = _webView.CoreWebView2;
+                if (core != null)
+                {
+                    var payload = JsonSerializer.SerializeToNode(contexto, JsonCamelCase) as JsonObject ?? new JsonObject();
+                    payload["tipo"] = "KIOSK";
+                    core.PostWebMessageAsJson(payload.ToJsonString());
+                }
+
+                tcs.TrySetResult(new IpcResponse(true, "Kiosk context applied"));
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to apply kiosk context");
+                tcs.TrySetResult(new IpcResponse(false, $"Error: {ex.Message}"));
+            }
+        }));
+
+        return await tcs.Task;
+    }
+
+    private IpcResponse HandleNavigateLocalCommand(IpcCommand command)
+    {
+        command.Parameters.TryGetValue("tipo", out var tipo);
+        command.Parameters.TryGetValue("html", out var html);
+        command.Parameters.TryGetValue("nome", out var nome);
+        command.Parameters.TryGetValue("identificador", out var identificador);
+        command.Parameters.TryGetValue("mensagem", out var mensagem);
+
+        if (string.IsNullOrWhiteSpace(html) && !PaginasLocais.EhTipoValido(tipo))
+        {
+            return new IpcResponse(false, "Missing 'html' or valid 'tipo' parameter");
+        }
+
+        var hasCore = false;
+        Invoke(() =>
+        {
+            var core = _webView.CoreWebView2;
+            hasCore = core != null;
+            if (core == null) return;
+
+            if (!string.IsNullOrWhiteSpace(html))
+            {
+                _telaLocalAtual = "HTML";
+                core.NavigateToString(html);
+            }
+            else
+            {
+                NavigateLocalPage(tipo!, nome, identificador, mensagem);
+            }
+        });
+
+        return hasCore
+            ? new IpcResponse(true, "Local page shown")
+            : new IpcResponse(false, "WebView2 not initialized");
+    }
+
+    private IpcResponse HandlePostToPageCommand(IpcCommand command)
+    {
+        if (!command.Parameters.TryGetValue("json", out var json) || string.IsNullOrWhiteSpace(json))
+        {
+            return new IpcResponse(false, "Missing 'json' parameter");
+        }
+
+        var hasCore = false;
+        Invoke(() =>
+        {
+            var core = _webView.CoreWebView2;
+            hasCore = core != null;
+            core?.PostWebMessageAsJson(json);
+        });
+
+        return hasCore
+            ? new IpcResponse(true, "Posted")
+            : new IpcResponse(false, "WebView2 not initialized");
     }
 
     private IpcResponse HandleShutdownCommand()
@@ -367,9 +563,20 @@ public partial class MainForm : Form
 
     private IpcResponse HandleGetStatusCommand()
     {
+        var currentUrl = string.Empty;
+        try
+        {
+            Invoke(() => currentUrl = _webView.CoreWebView2?.Source ?? string.Empty);
+        }
+        catch { }
+
         var status = new Dictionary<string, string>
         {
             { "url", _config.NpsUrl },
+            { "currentUrl", currentUrl },
+            { "local", _telaLocalAtual },
+            { "carregada", _carregada.ToString() },
+            { "paginaJson", _paginaJson },
             { "monitor", _targetScreen.DeviceName },
             { "monitorIndex", Array.IndexOf(Screen.AllScreens, _targetScreen).ToString() },
             { "topMost", this.TopMost.ToString() },

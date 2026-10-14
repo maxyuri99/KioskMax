@@ -8,7 +8,7 @@
   #define MyAppPublisher "Max Yuri"
 #endif
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.0"
+  #define MyAppVersion "2.0.0"
 #endif
 #ifndef MyAppURL
   #define MyAppURL "https://github.com/maxyuri99/"
@@ -98,4 +98,22 @@ begin
     end;
   end;
   Result := '';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Url, ConfigPath, Conteudo: String;
+  Ansi: AnsiString;
+begin
+  if CurStep <> ssPostInstall then Exit;
+  Url := Trim(ExpandConstant('{param:GESTAOURL|}'));
+  if Url = '' then Exit;
+  ConfigPath := ExpandConstant('{commonappdata}\UpMais\NpsKiosk\config.json');
+  if not LoadStringFromFile(ConfigPath, Ansi) then Exit;
+  Conteudo := String(Ansi);
+  if Pos('"gestaoApiUrl": ""', Conteudo) > 0 then
+    StringChangeEx(Conteudo, '"gestaoApiUrl": ""', '"gestaoApiUrl": "' + Url + '"', True)
+  else if Pos('"gestaoApiUrl"', Conteudo) = 0 then
+    StringChangeEx(Conteudo, '{', '{' + #13#10 + '  "gestaoApiUrl": "' + Url + '",', False);
+  SaveStringToFile(ConfigPath, AnsiString(Conteudo), False);
 end;

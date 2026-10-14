@@ -18,7 +18,22 @@ public class ConfigManager
     private static readonly string ConfigFilePath = Path.Combine(ConfigDirectory, "config.json");
     private static readonly string LogDirectory = Path.Combine(ConfigDirectory, "logs");
 
+    private static readonly object ConfigLock = new();
+
     public static string GetLogDirectory() => LogDirectory;
+
+    public static string GetConfigDirectory() => ConfigDirectory;
+
+    public static NpsConfig Update(Action<NpsConfig> mutate)
+    {
+        lock (ConfigLock)
+        {
+            var config = LoadConfig();
+            mutate(config);
+            SaveConfig(config);
+            return config;
+        }
+    }
 
     /// <summary>
     /// Deletes old log files beyond a maximum retention window in days.
@@ -68,13 +83,17 @@ public class ConfigManager
                 
                 if (config != null)
                 {
-                    Log.Information("Configuration loaded from {Path}", ConfigFilePath);
+                    if (string.IsNullOrWhiteSpace(config.KioskIdentificador))
+                    {
+                        config.KioskIdentificador = Guid.NewGuid().ToString("N");
+                        SaveConfig(config);
+                    }
                     return config;
                 }
             }
 
             // Create default config
-            var defaultConfig = new NpsConfig();
+            var defaultConfig = new NpsConfig { KioskIdentificador = Guid.NewGuid().ToString("N") };
             SaveConfig(defaultConfig);
             Log.Information("Default configuration created at {Path}", ConfigFilePath);
             return defaultConfig;
@@ -100,8 +119,10 @@ public class ConfigManager
                 WriteIndented = true
             });
 
-            File.WriteAllText(ConfigFilePath, json);
-            Log.Information("Configuration saved to {Path}", ConfigFilePath);
+            var tempPath = ConfigFilePath + ".tmp";
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, ConfigFilePath, true);
+            Log.Debug("Configuration saved to {Path}", ConfigFilePath);
         }
         catch (Exception ex)
         {

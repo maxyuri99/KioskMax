@@ -38,7 +38,7 @@ partial class ControllerForm
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = true;
-        ClientSize = new Size(560, 348);
+        ClientSize = new Size(560, 640);
 
         lblTitle = new Label
         {
@@ -156,7 +156,7 @@ partial class ControllerForm
         {
             AutoSize = true,
             Text = "Criado por Max Yuri (GitHub)",
-            Location = new Point(16, 288),
+            Location = new Point(16, 614),
             LinkColor = Color.RoyalBlue,
             ActiveLinkColor = Color.DarkBlue
         };
