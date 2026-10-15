@@ -170,7 +170,7 @@ public sealed class ServicoTef : IAsyncDisposable
         {
             if (PortaEmUso(e))
             {
-                if (tentarLiberar && EncerrarTefManagerAntigo())
+                if (tentarLiberar && EncerrarTefManagerDelphi())
                 {
                     await Task.Delay(500);
                     await IniciarServidorAsync(porta, false);
@@ -187,7 +187,7 @@ public sealed class ServicoTef : IAsyncDisposable
         }
     }
 
-    private bool EncerrarTefManagerAntigo()
+    private bool EncerrarTefManagerDelphi()
     {
         var encerrou = false;
 
