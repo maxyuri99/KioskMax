@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 using NpsShared.Configuration;
+using NpsShared.Utilities;
 
 namespace NpsWatchdog;
 
@@ -12,7 +13,7 @@ public class Program
         // Initialize logging
         var logPath = Path.Combine(ConfigManager.GetLogDirectory(), "NpsWatchdog-.log");
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Information()
+            .MinimumLevel.Is(NivelLog.Ler())
             .WriteTo.File(logPath,
                 rollingInterval: RollingInterval.Day,
                 retainedFileCountLimit: 30,

@@ -26,6 +26,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private const int MaxEventosPorSinal = 20;
     private const int MaxEventosFila = 200;
     private static readonly int[] Recuos = { 5, 10, 20, 30 };
+    private static readonly TimeSpan RetencaoComandosExecutados = TimeSpan.FromHours(6);
 
     private readonly CancellationTokenSource _cts = new();
     private readonly ClienteGestao _cliente = new();
@@ -39,6 +40,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private bool _aplicadoNaSessao;
     private bool _tefIniciado;
     private int _indiceRecuo;
+    private readonly Dictionary<int, (DateTime Em, bool Sucesso, string Mensagem)> _comandosExecutados = new();
     private DateTime _impressorasEm = DateTime.MinValue;
     private IReadOnlyList<string> _impressoras = Array.Empty<string>();
     private DateTime _ultimaReinicializacaoTela = DateTime.MinValue;
@@ -155,7 +157,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         try
         {
-            Tef.DefinirImpressao(ImpressaoEfetiva(cfg));
+            AtualizarConfigTef(cfg);
             await Tef.IniciarAsync();
             _tefIniciado = true;
         }
@@ -347,7 +349,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     {
         var segundos = Recuos[Math.Min(_indiceRecuo, Recuos.Length - 1)];
         _indiceRecuo++;
-        return segundos;
+        return Math.Max(1, (int)Math.Round(segundos * (0.8 + Random.Shared.NextDouble() * 0.4)));
     }
 
     private void DefinirEstado(EstadoGestao estado, string mensagem, string situacao)
@@ -388,6 +390,33 @@ public sealed class AgenteKiosk : IAsyncDisposable
             JsonValueKind.Number => p.TryGetInt32(out var n) && n != 0,
             _ => padrao
         };
+    }
+
+    private void AtualizarConfigTef(NpsConfig cfg)
+    {
+        Tef.DefinirImpressao(ImpressaoEfetiva(cfg));
+        Tef.DefinirOrigensPermitidas(OrigensTefPermitidas(cfg), cfg.TefOrigensObrigatorio);
+    }
+
+    private static IEnumerable<string> OrigensTefPermitidas(NpsConfig cfg)
+    {
+        foreach (var url in new[]
+                 {
+                     cfg.NpsUrl,
+                     cfg.GestaoApiUrl,
+                     "https://backoffice-upmais-gestao-web.6yhsxt.easypanel.host",
+                     "https://nps-caixas-frente-caixa-teste.6yhsxt.easypanel.host"
+                 })
+        {
+            if (Uri.TryCreate(url?.Trim(), UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                yield return uri.GetLeftPart(UriPartial.Authority);
+        }
+
+        foreach (var origem in cfg.TefOrigensPermitidas ?? new List<string>())
+        {
+            if (!string.IsNullOrWhiteSpace(origem))
+                yield return origem.Trim();
+        }
     }
 
     private ConfiguracaoImpressao ImpressaoEfetiva(NpsConfig cfg)
@@ -432,7 +461,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             DescricaoCaixa = string.Empty;
             NomeTela = string.Empty;
 
-            if (_tefIniciado) Tef.DefinirImpressao(ImpressaoEfetiva(cfg));
+            if (_tefIniciado) AtualizarConfigTef(cfg);
 
             if (Tela.EstaRodando)
             {
@@ -582,7 +611,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     {
         try
         {
-            Tef.DefinirImpressao(ImpressaoEfetiva(cfg));
+            AtualizarConfigTef(cfg);
 
             if (cfg.TefAtivo && !_tefIniciado)
             {
@@ -852,6 +881,15 @@ public sealed class AgenteKiosk : IAsyncDisposable
         return tela;
     }
 
+    private void RegistrarComandoExecutado(int cd, bool sucesso, string mensagem)
+    {
+        var limite = DateTime.UtcNow - RetencaoComandosExecutados;
+        foreach (var antigo in _comandosExecutados.Where(x => x.Value.Em < limite).Select(x => x.Key).ToList())
+            _comandosExecutados.Remove(antigo);
+
+        _comandosExecutados[cd] = (DateTime.UtcNow, sucesso, mensagem);
+    }
+
     private async Task ExecutarComandosAsync(JsonElement dados, CancellationToken ct)
     {
         if (!dados.TryGetProperty("comandos", out var comandos) || comandos.ValueKind != JsonValueKind.Array) return;
@@ -861,6 +899,13 @@ public sealed class AgenteKiosk : IAsyncDisposable
             var cd = LerInteiro(comando, "cdComando");
             var nome = LerTexto(comando, "deComando").ToUpperInvariant();
             if (cd == null || string.IsNullOrEmpty(nome)) continue;
+
+            if (_comandosExecutados.TryGetValue(cd.Value, out var anterior))
+            {
+                Log.Information("Comando {Comando} ({Cd}) reentregue; nao sera executado de novo", nome, cd);
+                await _cliente.ResultadoComandoAsync(cd.Value, anterior.Sucesso, anterior.Mensagem, ct);
+                continue;
+            }
 
             Enfileirar("COMANDO_RECEBIDO", $"{nome} ({cd})");
             Log.Information("Comando recebido: {Comando} ({Cd})", nome, cd);
@@ -879,6 +924,8 @@ public sealed class AgenteKiosk : IAsyncDisposable
             }
 
             if (!sucesso) Enfileirar("ERRO_COMANDO", $"{nome}: {mensagem}");
+
+            RegistrarComandoExecutado(cd.Value, sucesso, mensagem);
 
             var resultado = await _cliente.ResultadoComandoAsync(cd.Value, sucesso, mensagem, ct);
             if (resultado.PrecisaRecuar)

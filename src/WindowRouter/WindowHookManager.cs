@@ -61,6 +61,17 @@ public class WindowHookManager : IDisposable
     private readonly Dictionary<uint, (string Name, long Tick)> _processNameCache = new();
     private readonly Dictionary<IntPtr, long> _lastForceRouteLogTick = new();
     private HashSet<string> _forceRouteProcessNames;
+    private DateTime _configLastWriteUtc = DateTime.MinValue;
+    private long _configLength = -1;
+    private IntPtr _browserHwnd;
+    private uint _browserPid;
+    private long _browserSearchTick;
+    private long _fastPinUntilTick;
+
+    private const int PinIntervalFastMs = 80;
+    private const int PinIntervalIdleMs = 300;
+    private const int PinFastWindowMs = 3000;
+    private const int BrowserSearchIntervalMs = 3000;
 
     public bool RoutingPaused { get; set; }
 
@@ -120,7 +131,7 @@ public class WindowHookManager : IDisposable
         _scanTimer.Tick += (_, _) => SafeScanAndRoute();
         _scanTimer.Start();
 
-        _pinTimer = new System.Windows.Forms.Timer { Interval = 80 };
+        _pinTimer = new System.Windows.Forms.Timer { Interval = PinIntervalIdleMs };
         _pinTimer.Tick += (_, _) => PinStickyWindows();
         _pinTimer.Start();
 
@@ -241,8 +252,13 @@ public class WindowHookManager : IDisposable
                 }
 
                 if (ShouldRouteWindow(hwnd, out _))
+                {
                     RouteWindowToTargetMonitor(hwnd, activate: true);
+                    _fastPinUntilTick = Environment.TickCount64 + PinFastWindowMs;
+                }
             }
+
+            AjustarIntervaloPin();
         }
         catch (Exception ex)
         {
@@ -250,11 +266,24 @@ public class WindowHookManager : IDisposable
         }
     }
 
+    private void AjustarIntervaloPin()
+    {
+        if (_pinTimer == null)
+            return;
+
+        var desejado = Environment.TickCount64 < _fastPinUntilTick ? PinIntervalFastMs : PinIntervalIdleMs;
+        if (_pinTimer.Interval != desejado)
+            _pinTimer.Interval = desejado;
+    }
+
     private void TrackAndRoute(IntPtr hwnd)
     {
         var force = IsForceRouteWindow(hwnd);
         if (force)
+        {
             _stickyHwnds.Add(hwnd);
+            _fastPinUntilTick = Environment.TickCount64 + PinFastWindowMs;
+        }
 
         if (ShouldRouteWindow(hwnd, out var skipReason))
         {
@@ -716,31 +745,19 @@ public class WindowHookManager : IDisposable
 
         try
         {
-            foreach (var processName in new[] { "KioskBrowser", "NpsDisplay" })
+            if (!TryGetBrowserWindow(out var hWnd))
+                return false;
+
+            var rect = new RECT();
+            if (!GetWindowRect(hWnd, ref rect))
             {
-                foreach (var p in Process.GetProcessesByName(processName))
-                {
-                    try
-                    {
-                        p.Refresh();
-                        var hWnd = p.MainWindowHandle;
-                        if (hWnd == IntPtr.Zero || !IsWindowVisible(hWnd))
-                            continue;
-
-                        var rect = new RECT();
-                        if (!GetWindowRect(hWnd, ref rect))
-                            continue;
-
-                        var center = new Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
-                        screen = Screen.FromPoint(center);
-                        return true;
-                    }
-                    finally
-                    {
-                        try { p.Dispose(); } catch { }
-                    }
-                }
+                InvalidateBrowserWindow();
+                return false;
             }
+
+            var center = new Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
+            screen = Screen.FromPoint(center);
+            return true;
         }
         catch
         {
@@ -749,12 +766,92 @@ public class WindowHookManager : IDisposable
         return false;
     }
 
+    private void InvalidateBrowserWindow()
+    {
+        _browserHwnd = IntPtr.Zero;
+        _browserPid = 0;
+    }
+
+    private bool IsCachedBrowserWindowValid()
+    {
+        if (_browserHwnd == IntPtr.Zero || !IsWindow(_browserHwnd) || !IsWindowVisible(_browserHwnd))
+            return false;
+
+        GetWindowThreadProcessId(_browserHwnd, out var pid);
+        return pid != 0 && pid == _browserPid;
+    }
+
+    private bool TryGetBrowserWindow(out IntPtr hWnd)
+    {
+        hWnd = IntPtr.Zero;
+
+        if (IsCachedBrowserWindowValid())
+        {
+            hWnd = _browserHwnd;
+            return true;
+        }
+
+        InvalidateBrowserWindow();
+
+        var now = Environment.TickCount64;
+        if (now - _browserSearchTick < BrowserSearchIntervalMs)
+            return false;
+        _browserSearchTick = now;
+
+        foreach (var processName in new[] { "KioskBrowser", "NpsDisplay" })
+        {
+            foreach (var p in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    p.Refresh();
+                    var handle = p.MainWindowHandle;
+                    if (handle == IntPtr.Zero || !IsWindowVisible(handle))
+                        continue;
+
+                    _browserHwnd = handle;
+                    _browserPid = (uint)p.Id;
+                    hWnd = handle;
+                    return true;
+                }
+                finally
+                {
+                    try { p.Dispose(); } catch { }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool ConfigFileChanged()
+    {
+        try
+        {
+            var info = new FileInfo(ConfigManager.GetConfigPath());
+            if (!info.Exists)
+                return _configLength != -1;
+
+            var mudou = info.LastWriteTimeUtc != _configLastWriteUtc || info.Length != _configLength;
+            _configLastWriteUtc = info.LastWriteTimeUtc;
+            _configLength = info.Length;
+            return mudou;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
     private void SynchronizeRoutingLayout()
     {
         try
         {
-            _config = ConfigManager.LoadConfig();
-            _forceRouteProcessNames = BuildForceRouteProcessNames(_config);
+            if (ConfigFileChanged())
+            {
+                _config = ConfigManager.LoadConfig();
+                _forceRouteProcessNames = BuildForceRouteProcessNames(_config);
+            }
         }
         catch (Exception ex)
         {

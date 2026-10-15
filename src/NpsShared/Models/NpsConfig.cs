@@ -38,6 +38,9 @@ public class NpsConfig
     /// <summary>Win32 virtual key (1–254). Default 0x50 = 'P'. Example: 0x31 = '1'.</summary>
     public int RouterPauseHotKeyVk { get; set; } = 0x50;
     public string LogLevel { get; set; } = "Information";
+    public string WebViewArgumentosAdicionais { get; set; } = string.Empty;
+    public List<string> TefOrigensPermitidas { get; set; } = new();
+    public bool TefOrigensObrigatorio { get; set; }
     public string GestaoApiUrl { get; set; } = string.Empty;
     public string KioskIdentificador { get; set; } = string.Empty;
     public KioskContexto? KioskContexto { get; set; }

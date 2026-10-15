@@ -22,12 +22,17 @@ internal sealed class ServidorTef
     private readonly Action<string> _aoRegistrar;
     private readonly Action<string, string> _aoEvento;
     private readonly Action<string, string> _aoUltima;
+    private readonly Func<IReadOnlyList<string>> _origensPermitidas;
+    private readonly Func<bool> _origensObrigatorio;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _origensAvisadas = new();
     private WebApplication? _app;
+    private int _avisoSemListaEmitido;
 
     public bool Executando => _app is not null;
 
     public ServidorTef(GerenciadorSitef gerenciador, ImpressoraComprovante impressora, Func<ConfiguracaoImpressao> config,
-        string versao, Func<int> tempoLimite, Action<string> aoRegistrar, Action<string, string> aoEvento, Action<string, string> aoUltima)
+        string versao, Func<int> tempoLimite, Action<string> aoRegistrar, Action<string, string> aoEvento, Action<string, string> aoUltima,
+        Func<IReadOnlyList<string>> origensPermitidas, Func<bool> origensObrigatorio)
     {
         _gerenciador = gerenciador;
         _impressora = impressora;
@@ -37,6 +42,8 @@ internal sealed class ServidorTef
         _aoRegistrar = aoRegistrar;
         _aoEvento = aoEvento;
         _aoUltima = aoUltima;
+        _origensPermitidas = origensPermitidas;
+        _origensObrigatorio = origensObrigatorio;
     }
 
     private sealed class SemLifetime : IHostLifetime
@@ -91,10 +98,115 @@ internal sealed class ServidorTef
         try { await app.DisposeAsync(); } catch { }
     }
 
+    private static string NormalizarOrigem(string origem) => origem.Trim().TrimEnd('/').ToLowerInvariant();
+
+    private static bool HostEhLoopback(string host) =>
+        host is "localhost" or "127.0.0.1" or "[::1]" or "::1";
+
+    private static bool OrigemEhLocal(string origem)
+    {
+        if (!Uri.TryCreate(origem, UriKind.Absolute, out var uri))
+            return false;
+
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            return false;
+
+        return HostEhLoopback(uri.Host) || uri.Host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool CorrespondeEntrada(string origem, string entrada)
+    {
+        var e = NormalizarOrigem(entrada);
+
+        if (!e.Contains('*'))
+            return origem == e;
+
+        var separador = e.IndexOf("://", StringComparison.Ordinal);
+        if (separador < 0)
+            return false;
+
+        var esquema = e[..(separador + 3)];
+        var restoEntrada = e[(separador + 3)..];
+        if (!restoEntrada.StartsWith("*.", StringComparison.Ordinal) || restoEntrada.IndexOf('*', 1) >= 0)
+            return false;
+
+        if (!origem.StartsWith(esquema, StringComparison.Ordinal))
+            return false;
+
+        var hostOrigem = origem[esquema.Length..];
+        var sufixo = restoEntrada[1..];
+        return hostOrigem.Length > sufixo.Length && hostOrigem.EndsWith(sufixo, StringComparison.Ordinal);
+    }
+
+    private bool OrigemPermitida(string origem, IReadOnlyList<string> lista)
+    {
+        var o = NormalizarOrigem(origem);
+
+        if (OrigemEhLocal(o))
+            return true;
+
+        foreach (var entrada in lista)
+        {
+            if (!string.IsNullOrWhiteSpace(entrada) && CorrespondeEntrada(o, entrada))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool OrigemLoopback(HttpContext ctx)
+    {
+        var ip = ctx.Connection.RemoteIpAddress;
+        return ip is null || System.Net.IPAddress.IsLoopback(ip);
+    }
+
+    private static bool HostValido(HttpContext ctx)
+    {
+        var host = ctx.Request.Host.Host;
+        return string.IsNullOrEmpty(host) || HostEhLoopback(host.ToLowerInvariant());
+    }
+
+    private bool ValidarOrigem(HttpContext ctx)
+    {
+        if (!HostValido(ctx))
+            return false;
+
+        var origem = ctx.Request.Headers["Origin"].ToString();
+        var lista = _origensPermitidas();
+
+        if (string.IsNullOrEmpty(origem))
+            return OrigemLoopback(ctx);
+
+        if (lista.Count == 0)
+        {
+            if (Interlocked.Exchange(ref _avisoSemListaEmitido, 1) == 0)
+                _aoEvento("TEF_SEGURANCA", "Nenhuma origem permitida configurada; aceitando qualquer origem como antes");
+
+            return true;
+        }
+
+        if (OrigemPermitida(origem, lista))
+            return true;
+
+        if (_origensObrigatorio())
+            return false;
+
+        if (_origensAvisadas.Count < 50 && _origensAvisadas.TryAdd(NormalizarOrigem(origem), 0))
+            _aoEvento("TEF_SEGURANCA", "Origem fora da lista aceita em modo aviso: " + NormalizarOrigem(origem));
+
+        return true;
+    }
+
     private static void Cors(HttpContext ctx)
     {
+        var origem = ctx.Request.Headers["Origin"].ToString();
         var h = ctx.Response.Headers;
-        h["Access-Control-Allow-Origin"] = "*";
+        h["Vary"] = "Origin";
+
+        if (string.IsNullOrEmpty(origem))
+            return;
+
+        h["Access-Control-Allow-Origin"] = origem;
         h["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
 
         var pedidos = ctx.Request.Headers["Access-Control-Request-Headers"].ToString();
@@ -132,6 +244,15 @@ internal sealed class ServidorTef
     {
         try
         {
+            if (!ValidarOrigem(ctx))
+            {
+                var recusada = ctx.Request.Headers["Origin"].ToString();
+                _aoEvento("TEF_SEGURANCA", "Origem recusada: " + (recusada == "" ? "(sem origem)" : recusada));
+                ctx.Response.Headers["Vary"] = "Origin";
+                await ResponderErro(ctx, 403, "Origem não permitida.");
+                return;
+            }
+
             Cors(ctx);
 
             if (HttpMethods.IsOptions(ctx.Request.Method))

@@ -12,7 +12,7 @@ static class Program
         // Initialize logging
         var logPath = Path.Combine(ConfigManager.GetLogDirectory(), "KioskBrowser-.log");
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Debug()
+            .MinimumLevel.Is(NivelLog.Ler())
             .WriteTo.File(logPath,
                 rollingInterval: RollingInterval.Day,
                 rollOnFileSizeLimit: true,

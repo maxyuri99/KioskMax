@@ -19,6 +19,8 @@ public sealed class ServicoTef : IAsyncDisposable
     private string? _ultimaSituacao;
     private DateTimeOffset? _ultimaEm;
     private bool _iniciado;
+    private volatile IReadOnlyList<string> _origensPermitidas = Array.Empty<string>();
+    private volatile bool _origensObrigatorio;
 
     public event Action<string, string>? Evento;
 
@@ -70,6 +72,12 @@ public sealed class ServicoTef : IAsyncDisposable
     }
 
     public static IReadOnlyList<string> ListarImpressoras() => ImpressoraComprovante.ListarImpressoras();
+
+    public void DefinirOrigensPermitidas(IEnumerable<string> origens, bool obrigatorio)
+    {
+        _origensObrigatorio = obrigatorio;
+        _origensPermitidas = origens.Where(o => !string.IsNullOrWhiteSpace(o)).Select(o => o.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
 
     public void DefinirImpressao(ConfiguracaoImpressao config)
     {
@@ -158,7 +166,7 @@ public sealed class ServicoTef : IAsyncDisposable
     private async Task IniciarServidorAsync(int porta, bool tentarLiberar)
     {
         var servidor = new ServidorTef(_gerenciador, _impressora, () => _impressao, _versao, () => TempoLimitePagamentoMs,
-            Registrar, Disparar, DefinirUltima);
+            Registrar, Disparar, DefinirUltima, () => _origensPermitidas, () => _origensObrigatorio);
 
         try
         {

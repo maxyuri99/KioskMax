@@ -26,6 +26,10 @@ public partial class MainForm : Form
     private string _paginaJson = string.Empty;
     private bool _carregada;
     private string _telaLocalAtual = string.Empty;
+    private System.Windows.Forms.Timer? _timerNovaTentativa;
+    private int _tentativasFalhas;
+
+    private static readonly int[] EsperaNovaTentativaSegundos = { 5, 10, 20, 30 };
 
     private static readonly JsonSerializerOptions JsonCamelCase = new()
     {
@@ -117,7 +121,11 @@ public partial class MainForm : Form
             var userDataFolder = Path.Combine(appDir, "WebView2");
             Directory.CreateDirectory(userDataFolder);
 
-            var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
+            var opcoesAmbiente = new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = MontarArgumentosNavegador()
+            };
+            var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder, opcoesAmbiente);
 
             await _webView.EnsureCoreWebView2Async(env);
 
@@ -153,11 +161,19 @@ public partial class MainForm : Form
             };
             _webView.CoreWebView2.NavigationCompleted += (s, e) =>
             {
-                _carregada = e.IsSuccess;
-                if (!e.IsSuccess)
+                var paginaDeErro = _webView.CoreWebView2?.Source?.StartsWith("chrome-error:", StringComparison.OrdinalIgnoreCase) == true;
+                _carregada = e.IsSuccess && !paginaDeErro;
+                if (_carregada)
                 {
-                    Log.Warning("Navigation failed: {Status}", e.WebErrorStatus);
+                    PararNovaTentativa();
+                    return;
                 }
+
+                if (e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled)
+                    return;
+
+                Log.Warning("Navigation failed: {Status}", e.WebErrorStatus);
+                AgendarNovaTentativa();
             };
 
             await RegisterKioskScriptAsync();
@@ -181,6 +197,56 @@ public partial class MainForm : Form
             MessageBox.Show($"Failed to initialize browser: {ex.Message}", "Error", 
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private const string ArgumentosNavegadorEconomicos = "--renderer-process-limit=1";
+
+    private string MontarArgumentosNavegador() =>
+        string.IsNullOrWhiteSpace(_config.WebViewArgumentosAdicionais)
+            ? ArgumentosNavegadorEconomicos
+            : $"{ArgumentosNavegadorEconomicos} {_config.WebViewArgumentosAdicionais.Trim()}";
+
+    private void AgendarNovaTentativa()
+    {
+        if (_telaLocalAtual.Length > 0 || string.IsNullOrWhiteSpace(_config.NpsUrl))
+            return;
+
+        var indice = Math.Min(_tentativasFalhas, EsperaNovaTentativaSegundos.Length - 1);
+        var espera = EsperaNovaTentativaSegundos[indice];
+        _tentativasFalhas++;
+
+        _timerNovaTentativa ??= new System.Windows.Forms.Timer();
+        _timerNovaTentativa.Stop();
+        _timerNovaTentativa.Tick -= TimerNovaTentativa_Tick;
+        _timerNovaTentativa.Tick += TimerNovaTentativa_Tick;
+        _timerNovaTentativa.Interval = espera * 1000;
+        _timerNovaTentativa.Start();
+        Log.Information("Tela do cliente nao carregou; nova tentativa em {Segundos}s (tentativa {N})", espera, _tentativasFalhas);
+    }
+
+    private void TimerNovaTentativa_Tick(object? sender, EventArgs e)
+    {
+        _timerNovaTentativa?.Stop();
+
+        try
+        {
+            var core = _webView.CoreWebView2;
+            if (core == null || _carregada || _telaLocalAtual.Length > 0 || string.IsNullOrWhiteSpace(_config.NpsUrl))
+                return;
+
+            core.Navigate(_config.NpsUrl);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Falha ao tentar recarregar a tela do cliente");
+            AgendarNovaTentativa();
+        }
+    }
+
+    private void PararNovaTentativa()
+    {
+        _tentativasFalhas = 0;
+        _timerNovaTentativa?.Stop();
     }
 
     private async Task RegisterKioskScriptAsync()
@@ -211,6 +277,7 @@ public partial class MainForm : Form
         var id = !string.IsNullOrWhiteSpace(identificador) ? identificador! : _config.KioskIdentificador;
 
         _telaLocalAtual = tipo;
+        PararNovaTentativa();
         core.NavigateToString(PaginasLocais.Renderizar(tipo, nomeKiosk, id, mensagem));
     }
 
