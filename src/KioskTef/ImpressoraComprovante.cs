@@ -340,6 +340,225 @@ public sealed class ImpressoraComprovante
         doc.Print();
     }
 
+    private const string MarcaQrCode = "\u0002QRCODE";
+    private const int LadoQrCodeEmPontos = 240;
+    private const int LadoMaximoImagem = 1200;
+
+    public void ImprimirCupom(List<string> linhas, byte[]? qrCodePng)
+    {
+        var config = _config();
+        var impressora = config.Impressora;
+
+        if (TextoDelphi.Aparar(impressora) == "")
+            throw new Exception("Nenhuma impressora está configurada no kiosk. " +
+                                "Abra a configuração do kiosk nesta máquina e escolha a impressora do comprovante.");
+
+        if (!ListarImpressoras().Any(p => string.Equals(p, impressora, StringComparison.OrdinalIgnoreCase)))
+            throw new Exception("A impressora \"" + impressora + "\" não foi encontrada neste computador. " +
+                                "Verifique se ela está ligada e instalada.");
+
+        if (linhas.Count == 0)
+            throw new Exception("O cupom não tem linhas para imprimir.");
+
+        using var qrCode = qrCodePng is null ? null : CarregarImagem(qrCodePng);
+
+        ExecutarSerializado(() =>
+        {
+            if (config.ModoDriver)
+                ImprimirCupomDriver(impressora, linhas, qrCode);
+            else
+                ImprimirCupomRaw(impressora, linhas, qrCode, config.CortarPapel);
+        });
+    }
+
+    private static Bitmap CarregarImagem(byte[] png)
+    {
+        using var fluxo = new MemoryStream(png);
+        Image original;
+
+        try
+        {
+            original = Image.FromStream(fluxo);
+        }
+        catch (ArgumentException)
+        {
+            throw new Exception("A imagem do QR Code do cupom é inválida.");
+        }
+
+        using (original)
+        {
+            if (original.Width > LadoMaximoImagem || original.Height > LadoMaximoImagem)
+                throw new Exception("A imagem do QR Code do cupom é grande demais.");
+
+            return new Bitmap(original);
+        }
+    }
+
+    internal static byte[] RasterEscPos(Bitmap imagem, int lado)
+    {
+        using var reduzida = new Bitmap(lado, lado);
+        using (var g = Graphics.FromImage(reduzida))
+        {
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+            g.Clear(Color.White);
+            g.DrawImage(imagem, 0, 0, lado, lado);
+        }
+
+        var bytesPorLinha = (lado + 7) / 8;
+        var dados = new List<byte> { 0x1d, 0x76, 0x30, 0x00, (byte)(bytesPorLinha & 0xff), (byte)(bytesPorLinha >> 8), (byte)(lado & 0xff), (byte)(lado >> 8) };
+
+        for (var y = 0; y < lado; y++)
+        {
+            for (var b = 0; b < bytesPorLinha; b++)
+            {
+                byte valor = 0;
+
+                for (var bit = 0; bit < 8; bit++)
+                {
+                    var x = b * 8 + bit;
+                    if (x >= lado)
+                        continue;
+
+                    var cor = reduzida.GetPixel(x, y);
+                    if ((cor.R + cor.G + cor.B) / 3 < 128)
+                        valor |= (byte)(0x80 >> bit);
+                }
+
+                dados.Add(valor);
+            }
+        }
+
+        return dados.ToArray();
+    }
+
+    private static void ImprimirCupomRaw(string impressora, List<string> linhas, Bitmap? qrCode, bool cortar)
+    {
+        var dados = new List<byte>();
+        dados.AddRange(new byte[] { 0x1b, 0x40 });
+
+        foreach (var linha in linhas)
+        {
+            if (linha == MarcaQrCode)
+            {
+                if (qrCode is null)
+                    continue;
+
+                dados.AddRange(new byte[] { 0x1b, 0x61, 0x01 });
+                dados.AddRange(RasterEscPos(qrCode, LadoQrCodeEmPontos));
+                dados.AddRange(new byte[] { 0x0a, 0x1b, 0x61, 0x00 });
+            }
+            else
+                dados.AddRange(Encoding.Latin1.GetBytes(RemoverAcentos(linha) + "\r\n"));
+        }
+
+        dados.AddRange(Encoding.Latin1.GetBytes("\r\n\r\n\r\n\r\n\r\n"));
+
+        if (cortar)
+            dados.AddRange(new byte[] { 0x1d, 0x56, 0x01 });
+
+        var bytes = dados.ToArray();
+
+        if (!OpenPrinter(impressora, out var handle, IntPtr.Zero))
+            throw new Exception("Não foi possível acessar a impressora \"" + impressora + "\": " + MensagemErro(Marshal.GetLastWin32Error()));
+
+        try
+        {
+            var doc = new DocInfo1 { pDocName = "Cupom", pOutputFile = null, pDatatype = "RAW" };
+
+            if (StartDocPrinter(handle, 1, ref doc) == 0)
+                throw new Exception("Não foi possível iniciar a impressão: " + MensagemErro(Marshal.GetLastWin32Error()));
+
+            try
+            {
+                StartPagePrinter(handle);
+
+                if (!WritePrinter(handle, bytes, bytes.Length, out _))
+                    throw new Exception("Não foi possível enviar o cupom para a impressora: " + MensagemErro(Marshal.GetLastWin32Error()));
+
+                EndPagePrinter(handle);
+            }
+            finally
+            {
+                EndDocPrinter(handle);
+            }
+        }
+        finally
+        {
+            ClosePrinter(handle);
+        }
+    }
+
+    private static void ImprimirCupomDriver(string impressora, List<string> linhas, Bitmap? qrCode)
+    {
+        var doc = new PrintDocument
+        {
+            DocumentName = "Cupom"
+        };
+
+        doc.PrinterSettings.PrinterName = impressora;
+
+        var indice = 0;
+
+        doc.PrintPage += (_, e) =>
+        {
+            var g = e.Graphics!;
+            var largura = g.VisibleClipBounds.Width;
+            var altura = g.VisibleClipBounds.Height;
+            var tamanho = 12f;
+
+            var fonte = new Font("Courier New", tamanho);
+
+            try
+            {
+                while (tamanho > 5 && g.MeasureString(new string('W', Colunas), fonte, int.MaxValue, StringFormat.GenericTypographic).Width > largura)
+                {
+                    tamanho -= 1;
+                    fonte.Dispose();
+                    fonte = new Font("Courier New", tamanho);
+                }
+
+                var altLinha = fonte.GetHeight(g);
+                var ladoQr = largura * 0.45f;
+                float y = 0;
+                e.HasMorePages = false;
+
+                while (indice < linhas.Count)
+                {
+                    var linha = linhas[indice];
+                    var ehQr = linha == MarcaQrCode;
+                    var alturaItem = ehQr ? (qrCode is null ? 0 : ladoQr + altLinha) : altLinha;
+
+                    if (y + alturaItem > altura && y > 0)
+                    {
+                        e.HasMorePages = true;
+                        return;
+                    }
+
+                    if (ehQr)
+                    {
+                        if (qrCode is not null)
+                        {
+                            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                            g.DrawImage(qrCode, (largura - ladoQr) / 2, y, ladoQr, ladoQr);
+                        }
+                    }
+                    else
+                        g.DrawString(linha, fonte, Brushes.Black, 0, y, StringFormat.GenericTypographic);
+
+                    y += alturaItem;
+                    indice++;
+                }
+            }
+            finally
+            {
+                fonte.Dispose();
+            }
+        };
+
+        doc.Print();
+    }
+
     internal static string RemoverAcentos(string texto)
     {
         var chars = texto.ToCharArray();

@@ -67,6 +67,7 @@ internal sealed class ServidorTef
             o.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(15);
             o.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(1);
             o.Limits.MinRequestBodyDataRate = null;
+            o.Limits.MaxRequestBodySize = TamanhoMaximoCorpo;
             o.ListenLocalhost(porta);
         });
 
@@ -97,6 +98,9 @@ internal sealed class ServidorTef
         try { await app.StopAsync(TimeSpan.FromSeconds(3)); } catch { }
         try { await app.DisposeAsync(); } catch { }
     }
+
+    private const long TamanhoMaximoCorpo = 1024 * 1024;
+    private const int LinhasMaximasCupom = 2000;
 
     private static string NormalizarOrigem(string origem) => origem.Trim().TrimEnd('/').ToLowerInvariant();
 
@@ -279,6 +283,9 @@ internal sealed class ServidorTef
                     case "/tef/imprimir":
                         await Imprimir(ctx);
                         return;
+                    case "/impressao/cupom":
+                        await ImprimirCupom(ctx);
+                        return;
                 }
             }
 
@@ -412,6 +419,61 @@ internal sealed class ServidorTef
             var msg = "Erro ao imprimir comprovante TEF: " + erro;
             _aoRegistrar(msg);
             _aoEvento("TEF_IMPRESSAO", msg);
+            await ResponderErro(ctx, 500, erro);
+        }
+    }
+
+    private async Task ImprimirCupom(HttpContext ctx)
+    {
+        var corpo = await LerCorpo(ctx);
+        var req = TextoDelphi.InterpretarObjeto(corpo);
+        var erro = "";
+        var linhas = new List<string>();
+        byte[]? qrCode = null;
+
+        if (req is null || req["linhas"] is not JsonArray vetor || vetor.Count == 0 || vetor.Count > LinhasMaximasCupom)
+            erro = "Nenhum cupom foi recebido para impressão.";
+        else
+        {
+            foreach (var item in vetor)
+                linhas.Add(TextoDelphi.ValorBruto(item));
+
+            var png = req["qrCodePng"] is JsonValue v ? TextoDelphi.ValorBruto(v) : "";
+            if (png != "")
+            {
+                try
+                {
+                    qrCode = Convert.FromBase64String(png);
+                }
+                catch (FormatException)
+                {
+                    erro = "A imagem do QR Code do cupom é inválida.";
+                }
+            }
+        }
+
+        if (erro == "")
+        {
+            try
+            {
+                await Task.Run(() => _impressora.ImprimirCupom(linhas, qrCode));
+                var msg = "Cupom enviado para a impressora " + _config().Impressora + ".";
+                _aoRegistrar(msg);
+                _aoEvento("IMPRESSAO_CUPOM", msg);
+            }
+            catch (Exception e)
+            {
+                erro = e.Message;
+            }
+        }
+
+        if (erro == "")
+            await Responder(ctx, 200, new JsonObject { ["ok"] = true });
+        else
+        {
+            var msg = "Erro ao imprimir cupom: " + erro;
+            _aoRegistrar(msg);
+            _aoEvento("IMPRESSAO_CUPOM", msg);
             await ResponderErro(ctx, 500, erro);
         }
     }
