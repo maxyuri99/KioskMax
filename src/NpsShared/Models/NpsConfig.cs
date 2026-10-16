@@ -50,6 +50,7 @@ public class NpsConfig
     public string UltimaSituacao { get; set; } = string.Empty;
     public string TelaLocal { get; set; } = string.Empty;
     public bool GestaoExibir { get; set; } = true;
+    public bool CapturaLeitora { get; set; }
     public TefImpressaoConfig? TefGestao { get; set; }
 }
 

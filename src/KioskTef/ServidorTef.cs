@@ -24,6 +24,8 @@ internal sealed class ServidorTef
     private readonly Action<string, string> _aoUltima;
     private readonly Func<IReadOnlyList<string>> _origensPermitidas;
     private readonly Func<bool> _origensObrigatorio;
+    private readonly Func<Func<string, Task<(int Status, JsonObject Corpo)>>?> _atestador;
+    private readonly Func<Func<JsonObject>?> _informarCaixa;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _origensAvisadas = new();
     private WebApplication? _app;
     private int _avisoSemListaEmitido;
@@ -32,7 +34,8 @@ internal sealed class ServidorTef
 
     public ServidorTef(GerenciadorSitef gerenciador, ImpressoraComprovante impressora, Func<ConfiguracaoImpressao> config,
         string versao, Func<int> tempoLimite, Action<string> aoRegistrar, Action<string, string> aoEvento, Action<string, string> aoUltima,
-        Func<IReadOnlyList<string>> origensPermitidas, Func<bool> origensObrigatorio)
+        Func<IReadOnlyList<string>> origensPermitidas, Func<bool> origensObrigatorio,
+        Func<Func<string, Task<(int Status, JsonObject Corpo)>>?> atestador, Func<Func<JsonObject>?> informarCaixa)
     {
         _gerenciador = gerenciador;
         _impressora = impressora;
@@ -44,6 +47,8 @@ internal sealed class ServidorTef
         _aoUltima = aoUltima;
         _origensPermitidas = origensPermitidas;
         _origensObrigatorio = origensObrigatorio;
+        _atestador = atestador;
+        _informarCaixa = informarCaixa;
     }
 
     private sealed class SemLifetime : IHostLifetime
@@ -286,7 +291,20 @@ internal sealed class ServidorTef
                     case "/impressao/cupom":
                         await ImprimirCupom(ctx);
                         return;
+                    case "/kiosk/atestar":
+                        await Atestar(ctx);
+                        return;
                 }
+            }
+
+            if (HttpMethods.IsGet(ctx.Request.Method) && caminho == "/kiosk/caixa")
+            {
+                var informar = _informarCaixa();
+                if (informar is null)
+                    await Responder(ctx, 409, new JsonObject { ["erro"] = "Este KioskMax não está ligado ao Gestão.", ["codigo"] = "KIOSK_SEM_GESTAO" });
+                else
+                    await Responder(ctx, 200, informar());
+                return;
             }
 
             await ResponderErro(ctx, 404, "Rota não encontrada.");
@@ -308,6 +326,21 @@ internal sealed class ServidorTef
     {
         using var leitor = new StreamReader(ctx.Request.Body, Utf8);
         return await leitor.ReadToEndAsync();
+    }
+
+    private async Task Atestar(HttpContext ctx)
+    {
+        var atestador = _atestador();
+
+        if (atestador is null)
+        {
+            await Responder(ctx, 409, new JsonObject { ["erro"] = "Este KioskMax não está ligado ao Gestão.", ["codigo"] = "KIOSK_SEM_GESTAO" });
+            return;
+        }
+
+        var corpo = await LerCorpo(ctx);
+        var (status, resposta) = await atestador(corpo);
+        await Responder(ctx, status, resposta);
     }
 
     private Task Teste(HttpContext ctx)

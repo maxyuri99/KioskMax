@@ -58,6 +58,27 @@ public sealed class ClienteGestao : IDisposable
         return PostarAsync($"/kiosk/dispositivo/comandos/{cdComando}/resultado", corpo, true, ct);
     }
 
+    public Task<RespostaGestao> AtestarAsync(string desafio, int codPdv, CancellationToken ct = default)
+    {
+        var corpo = new JsonObject
+        {
+            ["desafio"] = desafio,
+            ["codPdv"] = codPdv
+        };
+        return PostarAsync("/kiosk/dispositivo/atestados", corpo, true, ct);
+    }
+
+    public Task<RespostaGestao> LeituraAsync(string idLeitura, string texto, DateTimeOffset em, CancellationToken ct = default)
+    {
+        var corpo = new JsonObject
+        {
+            ["idLeitura"] = idLeitura,
+            ["texto"] = texto,
+            ["em"] = em.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz")
+        };
+        return PostarAsync("/kiosk/dispositivo/leituras", corpo, true, ct);
+    }
+
     private async Task<RespostaGestao> PostarAsync(string caminho, JsonNode corpo, bool autenticado, CancellationToken ct)
     {
         try

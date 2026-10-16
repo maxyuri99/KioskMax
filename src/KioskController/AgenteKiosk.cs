@@ -44,6 +44,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private DateTime _impressorasEm = DateTime.MinValue;
     private IReadOnlyList<string> _impressoras = Array.Empty<string>();
     private DateTime _ultimaReinicializacaoTela = DateTime.MinValue;
+    private readonly LeitoraKiosk _leitora;
 
     public GerenciadorTela Tela { get; } = new();
     public ServicoTef Tef { get; }
@@ -81,6 +82,11 @@ public sealed class AgenteKiosk : IAsyncDisposable
         Tef = new ServicoTef(versaoTef, mensagem => Log.Information("[TEF] {Mensagem}", mensagem));
         Tef.Evento += AoEventoTef;
 
+        Tef.Atestador = AtestarAsync;
+        Tef.InformarCaixa = InformarCaixa;
+        _leitora = new LeitoraKiosk(
+            (leitura, ct) => _cliente.LeituraAsync(leitura.IdLeitura, leitura.Texto, leitura.Em, ct), Enfileirar);
+
         Tela.Evento += (tipo, detalhe) => Enfileirar(tipo, detalhe);
         Tela.SaiuInesperadamente += AoTelaSairInesperadamente;
         SenhaLocal.Registro += (evento, acao) => Enfileirar(evento, acao);
@@ -88,6 +94,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
     public void Iniciar()
     {
+        _leitora.Iniciar();
         _tarefa = Task.Run(() => ExecutarAsync(_cts.Token));
     }
 
@@ -205,6 +212,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         if (string.IsNullOrEmpty(url))
         {
+            _leitora.Definir(false);
             DefinirEstado(EstadoGestao.Desativado, string.Empty, cfg.UltimaSituacao);
             return 5;
         }
@@ -440,6 +448,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
     private async Task AplicarSituacaoNaoAtivaAsync(string situacao, string nome)
     {
+        _leitora.Definir(false);
         await _travaAplicacao.WaitAsync();
         try
         {
@@ -521,6 +530,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             var nuMonitor = LerInteiro(config, "nuMonitor");
             var sempreVisivel = LerBool(config, "sempreVisivel", true);
             var roteador = LerBool(config, "roteador", false);
+            var capturaLeitora = LerBool(config, "capturaLeitora", false);
 
             var tef = config.ValueKind == JsonValueKind.Object && config.TryGetProperty("tef", out var t) && t.ValueKind == JsonValueKind.Object ? t : default;
             var tefAtivo = LerBool(tef, "ativo", true);
@@ -560,6 +570,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
                 x.RouterEnabled = roteador;
                 x.TefAtivo = tefAtivo;
                 x.TefGestao = tefImpressao;
+                x.CapturaLeitora = capturaLeitora;
                 x.MonitorPolicy = nuMonitor == null ? "Primary" : "Explicit";
                 if (nuMonitor != null)
                 {
@@ -578,6 +589,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
                 }
             });
             _aplicadoNaSessao = true;
+            _leitora.Definir(capturaLeitora && codPdv > 0);
 
             DescricaoCaixa = string.IsNullOrEmpty(dsPdv) ? (codPdv > 0 ? $"Caixa {codPdv}" : string.Empty) : $"{dsPdv} ({codPdv})";
             NomeTela = LerTexto(config, "nmTela");
@@ -835,10 +847,89 @@ public sealed class AgenteKiosk : IAsyncDisposable
                 ["erro"] = estadoTef.Erro ?? string.Empty
             },
             ["roteador"] = new JsonObject { ["ativo"] = Tela.RoteadorRodando },
+            ["leitora"] = new JsonObject
+            {
+                ["ativa"] = _leitora.Ativa,
+                ["pendentes"] = _leitora.Pendentes,
+                ["entregues"] = _leitora.Entregues,
+                ["descartadas"] = _leitora.Descartadas,
+                ["ultimaEm"] = _leitora.UltimaEm?.ToString("yyyy-MM-ddTHH:mm:sszzz")
+            },
             ["monitores"] = monitores,
             ["impressoras"] = impressoras,
             ["eventos"] = RetirarEventos()
         };
+    }
+
+    private JsonObject InformarCaixa()
+    {
+        var cfg = ConfigManager.LoadConfig();
+        var ativo = !string.IsNullOrWhiteSpace(cfg.GestaoApiUrl)
+            && string.Equals(cfg.UltimaSituacao, "ATIVO", StringComparison.OrdinalIgnoreCase);
+        return new JsonObject
+        {
+            ["cdKiosk"] = CdKiosk,
+            ["nmKiosk"] = NomeKiosk,
+            ["situacao"] = string.IsNullOrEmpty(cfg.UltimaSituacao) ? "SEM_GESTAO" : cfg.UltimaSituacao,
+            ["codPdv"] = ativo ? cfg.KioskContexto?.CodPdv ?? 0 : 0,
+            ["capturaLeitora"] = _leitora.Ativa
+        };
+    }
+
+    private static (int Status, JsonObject Corpo) RecusaAtestado(string codigo, string mensagem, int status = 409)
+    {
+        return (status, new JsonObject { ["erro"] = mensagem, ["codigo"] = codigo });
+    }
+
+    private async Task<(int Status, JsonObject Corpo)> AtestarAsync(string corpo)
+    {
+        string desafio;
+        int codPdv;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(corpo) ? "{}" : corpo);
+            desafio = LerTexto(doc.RootElement, "desafio").Trim();
+            codPdv = LerInteiro(doc.RootElement, "codPdv") ?? 0;
+        }
+        catch (JsonException)
+        {
+            return RecusaAtestado("CORPO_INVALIDO", "Pedido de atestado inválido.", 400);
+        }
+
+        if (desafio.Length == 0 || desafio.Length > 128 || codPdv <= 0)
+            return RecusaAtestado("CORPO_INVALIDO", "Pedido de atestado inválido.", 400);
+
+        var cfg = ConfigManager.LoadConfig();
+        if (string.IsNullOrWhiteSpace(cfg.GestaoApiUrl) || string.IsNullOrEmpty(_token))
+            return RecusaAtestado("KIOSK_SEM_GESTAO", "Este KioskMax não está ligado ao Gestão.");
+
+        if (string.Equals(cfg.UltimaSituacao, "BLOQUEADO", StringComparison.OrdinalIgnoreCase))
+            return RecusaAtestado("KIOSK_BLOQUEADO", "Este KioskMax está bloqueado no Gestão.");
+
+        if (!string.Equals(cfg.UltimaSituacao, "ATIVO", StringComparison.OrdinalIgnoreCase))
+            return RecusaAtestado("KIOSK_PENDENTE", "Este KioskMax ainda não foi aprovado no Gestão.");
+
+        var codPdvKiosk = cfg.KioskContexto?.CodPdv ?? 0;
+        if (codPdvKiosk != codPdv)
+        {
+            var recusa = RecusaAtestado("KIOSK_OUTRO_CAIXA", codPdvKiosk > 0
+                ? $"Este computador é do caixa {codPdvKiosk}."
+                : "Este KioskMax não está vinculado a um caixa.");
+            recusa.Corpo["codPdvKiosk"] = codPdvKiosk;
+            return recusa;
+        }
+
+        var resposta = await _cliente.AtestarAsync(desafio, codPdv, _cts.Token);
+
+        if (resposta.Sucesso)
+            return (200, new JsonObject { ["cdKiosk"] = CdKiosk, ["nmKiosk"] = NomeKiosk, ["codPdv"] = codPdv });
+
+        if (resposta.PrecisaRecuar)
+            return RecusaAtestado("KIOSK_SEM_REDE", "O KioskMax não conseguiu falar com o Gestão.", 503);
+
+        Enfileirar("ATESTADO_RECUSADO", resposta.Mensagem);
+        return RecusaAtestado("KIOSK_RECUSADO", string.IsNullOrEmpty(resposta.Mensagem) ? "O Gestão recusou o atestado." : resposta.Mensagem);
     }
 
     private async Task<JsonObject> MontarTelaAsync()
@@ -1011,6 +1102,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
         try { if (_tarefa != null) await Task.WhenAny(_tarefa, Task.Delay(2000)); } catch { }
         try { await Tef.PararAsync(); } catch { }
         try { await Tef.DisposeAsync(); } catch { }
+        try { await _leitora.DisposeAsync(); } catch { }
         _cliente.Dispose();
     }
 }

@@ -38,6 +38,10 @@ public sealed class ServicoTef : IAsyncDisposable
 
     public int TempoLimitePagamentoMs { get; set; } = 600000;
 
+    public Func<string, Task<(int Status, System.Text.Json.Nodes.JsonObject Corpo)>>? Atestador { get; set; }
+
+    public Func<System.Text.Json.Nodes.JsonObject>? InformarCaixa { get; set; }
+
     public ConfiguracaoImpressao Impressao => _impressao;
 
     public ServicoTef(string versao, Action<string>? aoRegistrar = null)
@@ -166,7 +170,7 @@ public sealed class ServicoTef : IAsyncDisposable
     private async Task IniciarServidorAsync(int porta, bool tentarLiberar)
     {
         var servidor = new ServidorTef(_gerenciador, _impressora, () => _impressao, _versao, () => TempoLimitePagamentoMs,
-            Registrar, Disparar, DefinirUltima, () => _origensPermitidas, () => _origensObrigatorio);
+            Registrar, Disparar, DefinirUltima, () => _origensPermitidas, () => _origensObrigatorio, () => Atestador, () => InformarCaixa);
 
         try
         {
