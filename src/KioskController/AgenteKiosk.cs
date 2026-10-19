@@ -446,6 +446,9 @@ public sealed class AgenteKiosk : IAsyncDisposable
                 yield return uri.GetLeftPart(UriPartial.Authority);
         }
 
+        yield return "https://*.upmais.com.br";
+        yield return "http://*.upmais.com.br";
+
         foreach (var origem in cfg.TefOrigensPermitidas ?? new List<string>())
         {
             if (!string.IsNullOrWhiteSpace(origem))

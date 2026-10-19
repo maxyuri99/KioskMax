@@ -8,9 +8,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>KioskController</AssemblyName>
     <RootNamespace>KioskController</RootNamespace>
-    <Version>2.0.2</Version>
-    <FileVersion>2.0.2</FileVersion>
-    <InformationalVersion>2.0.2</InformationalVersion>
+    <Version>2.0.3</Version>
+    <FileVersion>2.0.3</FileVersion>
+    <InformationalVersion>2.0.3</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

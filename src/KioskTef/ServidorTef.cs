@@ -144,6 +144,14 @@ internal sealed class ServidorTef
 
         var hostOrigem = origem[esquema.Length..];
         var sufixo = restoEntrada[1..];
+
+        if (!sufixo.Contains(':'))
+        {
+            var porta = hostOrigem.LastIndexOf(':');
+            if (porta >= 0 && !hostOrigem.EndsWith(']'))
+                hostOrigem = hostOrigem[..porta];
+        }
+
         return hostOrigem.Length > sufixo.Length && hostOrigem.EndsWith(sufixo, StringComparison.Ordinal);
     }
 
