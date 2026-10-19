@@ -412,7 +412,24 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private void AtualizarConfigTef(NpsConfig cfg)
     {
         Tef.DefinirImpressao(ImpressaoEfetiva(cfg));
+        Tef.DefinirTransporte(cfg.TefModo, cfg.TefPastaRequisicao, cfg.TefPastaResposta);
         Tef.DefinirOrigensPermitidas(OrigensTefPermitidas(cfg), cfg.TefOrigensObrigatorio);
+    }
+
+    private const string OrigemTefHomologacao = "https://nps-caixas-frente-caixa-teste.6yhsxt.easypanel.host";
+
+    private static bool AmbienteTeste(NpsConfig cfg)
+    {
+        foreach (var url in new[] { cfg.NpsUrl, cfg.GestaoApiUrl })
+        {
+            if (!Uri.TryCreate(url?.Trim(), UriKind.Absolute, out var uri))
+                continue;
+
+            if (uri.Host.Split('.', '-').Any(parte => string.Equals(parte, "teste", StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+
+        return false;
     }
 
     private static IEnumerable<string> OrigensTefPermitidas(NpsConfig cfg)
@@ -422,7 +439,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
                      cfg.NpsUrl,
                      cfg.GestaoApiUrl,
                      "https://backoffice-upmais-gestao-web.6yhsxt.easypanel.host",
-                     "https://nps-caixas-frente-caixa-teste.6yhsxt.easypanel.host"
+                     AmbienteTeste(cfg) ? OrigemTefHomologacao : null
                  })
         {
             if (Uri.TryCreate(url?.Trim(), UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
@@ -1186,6 +1203,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             {
                 if (!cfg.TefAtivo || !_tefIniciado) return (false, "O TEF está desativado");
                 if (Tef.Estado.Ocupado) return (false, "Há uma transação TEF em andamento");
+                AtualizarConfigTef(cfg);
                 var ok = await Tef.ReiniciarAsync();
                 return (ok, ok ? "TEF reiniciado" : "Não foi possível reiniciar o TEF");
             }

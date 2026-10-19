@@ -45,6 +45,9 @@ public class NpsConfig
     public string KioskIdentificador { get; set; } = string.Empty;
     public KioskContexto? KioskContexto { get; set; }
     public bool TefAtivo { get; set; } = true;
+    public string TefModo { get; set; } = "WebConnection";
+    public string TefPastaRequisicao { get; set; } = @"C:\Client\Req";
+    public string TefPastaResposta { get; set; } = @"C:\Client\Resp";
     public int UltimaVersaoConfig { get; set; }
     public string SenhaLocalHash { get; set; } = string.Empty;
     public string UltimaSituacao { get; set; } = string.Empty;

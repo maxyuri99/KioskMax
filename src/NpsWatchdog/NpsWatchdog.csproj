@@ -5,9 +5,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-NpsWatchdog-60395a6c-5cd7-4e5f-9d04-d5e5b1a01ff4</UserSecretsId>
-    <Version>2.0.1</Version>
-    <FileVersion>2.0.1</FileVersion>
-    <InformationalVersion>2.0.1</InformationalVersion>
+    <Version>2.0.2</Version>
+    <FileVersion>2.0.2</FileVersion>
+    <InformationalVersion>2.0.2</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

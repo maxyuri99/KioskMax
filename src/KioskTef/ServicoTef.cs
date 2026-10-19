@@ -100,6 +100,17 @@ public sealed class ServicoTef : IAsyncDisposable
         _impressao = config;
     }
 
+    public void DefinirTransporte(string? modo, string? pastaRequisicao, string? pastaResposta)
+    {
+        _gerenciador.Modo = string.IsNullOrWhiteSpace(modo) ? GerenciadorSitef.ModoWebConnection : modo.Trim();
+
+        if (!string.IsNullOrWhiteSpace(pastaRequisicao))
+            _gerenciador.PastaRequisicao = pastaRequisicao.Trim();
+
+        if (!string.IsNullOrWhiteSpace(pastaResposta))
+            _gerenciador.PastaResposta = pastaResposta.Trim();
+    }
+
     public void ImprimirTeste()
     {
         try

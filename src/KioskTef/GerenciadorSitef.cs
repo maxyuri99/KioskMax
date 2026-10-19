@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -8,6 +7,9 @@ namespace KioskTef;
 
 public sealed class GerenciadorSitef : IDisposable
 {
+    public const string ModoWebConnection = "WebConnection";
+    public const string ModoArquivos = "Arquivos";
+
     private const int DiasArquivos = 60;
     private static readonly UTF8Encoding Utf8Bom = new(true);
 
@@ -15,14 +17,13 @@ public sealed class GerenciadorSitef : IDisposable
                                              "confira no pinpad/relatório antes de cobrar de novo.";
 
     private readonly SemaphoreSlim _lockTransacao = new(1, 1);
-    private readonly SemaphoreSlim _lockConexao = new(1, 1);
     private readonly SemaphoreSlim _sinal = new(0, int.MaxValue);
     private readonly object _lockDados = new();
     private readonly object _lockArquivo = new();
+    private readonly object _lockGateway = new();
 
-    private ClientWebSocket? _socket;
-    private CancellationTokenSource? _cts;
-    private Task? _tarefaReconexao;
+    private IGatewayTef? _gateway;
+    private bool _iniciado;
     private bool _aguardando;
     private bool _pendente;
     private bool _emCurso;
@@ -37,18 +38,31 @@ public sealed class GerenciadorSitef : IDisposable
     private string _respostaParcial = "";
     private string _erroSocket = "";
     private bool _parcialNova;
-    private volatile bool _parando;
 
     public string Pasta { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TEFManagerUP");
     public string Endereco { get; set; } = "ws://localhost:9098/tef";
     public int IntervaloReconexaoMs { get; set; } = 3000;
+    public string Modo { get; set; } = ModoWebConnection;
+    public string PastaRequisicao { get; set; } = @"C:\Client\Req";
+    public string PastaResposta { get; set; } = @"C:\Client\Resp";
     public TimeSpan LimitePendente { get; set; } = TimeSpan.FromMinutes(15);
     public Action<string>? AoRegistrar { get; set; }
     public Action<bool>? AoMudarConexao { get; set; }
     public Action<string, string>? AoEvento { get; set; }
     public Action<bool>? AoMudarOcupado { get; set; }
 
-    public bool Conectado => _socket is { State: WebSocketState.Open };
+    public bool Conectado => _gateway?.Conectado ?? false;
+
+    private IGatewayTef Gateway
+    {
+        get
+        {
+            lock (_lockGateway)
+            {
+                return _gateway ??= CriarGateway();
+            }
+        }
+    }
 
     public bool Ocupado
     {
@@ -109,162 +123,70 @@ public sealed class GerenciadorSitef : IDisposable
 
     public void Iniciar()
     {
-        if (_tarefaReconexao is not null)
-            return;
+        IGatewayTef? anterior;
+        IGatewayTef gateway;
 
-        _parando = false;
-        _cts = new CancellationTokenSource();
-        var ct = _cts.Token;
-
-        _tarefaReconexao = Task.Run(async () =>
+        lock (_lockGateway)
         {
-            while (!ct.IsCancellationRequested)
-            {
-                try
-                {
-                    if (!Conectado)
-                        await ConectarAsync();
-                }
-                catch
-                {
-                }
+            if (_iniciado)
+                return;
 
-                try
-                {
-                    await Task.Delay(IntervaloReconexaoMs, ct);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-            }
-        });
+            _iniciado = true;
+            anterior = _gateway;
+            gateway = CriarGateway();
+            _gateway = gateway;
+        }
+
+        if (anterior is not null)
+        {
+            anterior.AoAbrir = null;
+            anterior.AoFechar = null;
+            anterior.AoFalhar = null;
+            anterior.AoReceber = null;
+            _ = anterior.PararAsync();
+        }
+
+        if (gateway is GatewayArquivosSitef)
+            Log("TEF em modo arquivos: pedidos em " + PastaRequisicao + " e respostas em " + PastaResposta + ".");
+
+        gateway.Iniciar();
     }
 
     public async Task PararAsync()
     {
-        _parando = true;
-        var cts = _cts;
-        var tarefa = _tarefaReconexao;
-        _cts = null;
-        _tarefaReconexao = null;
+        IGatewayTef? gateway;
 
-        if (cts is not null)
+        lock (_lockGateway)
         {
-            cts.Cancel();
-
-            if (tarefa is not null)
-            {
-                try { await tarefa; } catch { }
-            }
-
-            cts.Dispose();
+            _iniciado = false;
+            gateway = _gateway;
         }
 
-        await DesconectarAsync();
+        if (gateway is not null)
+            await gateway.PararAsync();
     }
 
-    public async Task DesconectarAsync()
+    public Task DesconectarAsync()
     {
-        var ws = _socket;
-
-        if (ws is null)
-            return;
-
-        try
-        {
-            if (ws.State == WebSocketState.Open)
-            {
-                using var cts = new CancellationTokenSource(2000);
-                await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", cts.Token);
-            }
-        }
-        catch
-        {
-        }
-
-        try { ws.Abort(); } catch { }
+        return _gateway?.DesconectarAsync() ?? Task.CompletedTask;
     }
 
-    public async Task ConectarAsync()
+    public Task ConectarAsync()
     {
-        await _lockConexao.WaitAsync();
-
-        try
-        {
-            if (Conectado)
-                return;
-
-            var ws = new ClientWebSocket();
-
-            try
-            {
-                using var cts = new CancellationTokenSource(5000);
-                await ws.ConnectAsync(new Uri(Endereco), cts.Token);
-            }
-            catch
-            {
-                ws.Dispose();
-                throw;
-            }
-
-            _socket = ws;
-            SocketOpen();
-            _ = Task.Run(() => LoopReceberAsync(ws));
-        }
-        finally
-        {
-            _lockConexao.Release();
-        }
+        return Gateway.ConectarAsync();
     }
 
-    private async Task LoopReceberAsync(ClientWebSocket ws)
+    private IGatewayTef CriarGateway()
     {
-        var buffer = new byte[16384];
+        IGatewayTef gateway = string.Equals(TextoDelphi.Aparar(Modo), ModoArquivos, StringComparison.OrdinalIgnoreCase)
+            ? new GatewayArquivosSitef(PastaRequisicao, PastaResposta, () => PastaTransacoes, Log, Evento)
+            : new GatewayWebConnection(Endereco, IntervaloReconexaoMs);
 
-        try
-        {
-            while (ws.State == WebSocketState.Open)
-            {
-                using var ms = new MemoryStream();
-                WebSocketReceiveResult r;
-
-                do
-                {
-                    r = await ws.ReceiveAsync(buffer, CancellationToken.None);
-
-                    if (r.MessageType == WebSocketMessageType.Close)
-                    {
-                        try { await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None); } catch { }
-                        return;
-                    }
-
-                    ms.Write(buffer, 0, r.Count);
-                }
-                while (!r.EndOfMessage);
-
-                var texto = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-
-                try
-                {
-                    SocketMessage(texto);
-                }
-                catch (Exception e)
-                {
-                    Log("Erro ao processar mensagem do Web Connection: " + e.Message);
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            if (!_parando)
-                SocketError(e.Message);
-        }
-        finally
-        {
-            SocketClose(ws);
-            try { ws.Dispose(); } catch { }
-        }
+        gateway.AoAbrir = TransporteAberto;
+        gateway.AoFechar = TransporteFechado;
+        gateway.AoFalhar = TransporteFalhou;
+        gateway.AoReceber = TransporteRecebeu;
+        return gateway;
     }
 
     private void Log(string mensagem)
@@ -466,7 +388,7 @@ public sealed class GerenciadorSitef : IDisposable
         return daOperacao != "" ? daOperacao : deOutra;
     }
 
-    private bool RegistrarMensagem(string arquivo, string mensagem, JsonObject? json, bool final, out JsonObject registro)
+    private bool RegistrarMensagem(string arquivo, string mensagem, JsonObject? json, bool final, out JsonObject registro, out bool gravado)
     {
         var obj = LerArquivo(arquivo, out var ilegivel);
 
@@ -523,7 +445,7 @@ public sealed class GerenciadorSitef : IDisposable
             }
         }
 
-        GravarArquivo(arquivo, obj);
+        gravado = GravarArquivo(arquivo, obj);
         registro = obj;
         return primeira;
     }
@@ -583,7 +505,14 @@ public sealed class GerenciadorSitef : IDisposable
                " status " + TextoDelphi.ValorTexto(json, "statusTransacao");
     }
 
-    private void SocketOpen()
+    private string DescricaoTransporte => _gateway?.Descricao ?? "Web Connection";
+
+    private static string NomeCompleto(IGatewayTef gateway)
+    {
+        return gateway is GatewayWebConnection ? "Sankhya " + gateway.Descricao : gateway.Descricao;
+    }
+
+    private void TransporteAberto()
     {
         bool log;
 
@@ -595,27 +524,24 @@ public sealed class GerenciadorSitef : IDisposable
 
         if (log)
         {
-            Log("Conectado ao Web Connection.");
+            Log("Conectado ao " + DescricaoTransporte + ".");
             try { AoMudarConexao?.Invoke(true); } catch { }
         }
     }
 
-    private void SocketClose(ClientWebSocket ws)
+    private void TransporteFechado()
     {
         bool log;
 
         lock (_lockDados)
         {
-            if (ReferenceEquals(_socket, ws))
-                _socket = null;
-
             log = _conectado;
             _conectado = false;
         }
 
         if (log)
         {
-            Log("Conexão com o Web Connection encerrada.");
+            Log("Conexão com o " + DescricaoTransporte + " encerrada.");
             try { AoMudarConexao?.Invoke(false); } catch { }
         }
 
@@ -626,7 +552,7 @@ public sealed class GerenciadorSitef : IDisposable
             if (_aguardando && _respostaFinal == "")
             {
                 if (_erroSocket == "")
-                    _erroSocket = "conexão encerrada pelo Web Connection";
+                    _erroSocket = "conexão encerrada pelo " + DescricaoTransporte;
 
                 _sinal.Release();
             }
@@ -641,13 +567,13 @@ public sealed class GerenciadorSitef : IDisposable
         if (pendenteEncerrada != "")
         {
             Log("A conexão caiu com a transação pendente no SiTef (" + pendenteEncerrada + "). Registrada como " + SituacaoTef.SemResposta + ".");
-            Evento("TEF_PENDENTE_ENCERRADA", pendenteEncerrada + " sem resposta: conexão com o Web Connection encerrada");
+            Evento("TEF_PENDENTE_ENCERRADA", pendenteEncerrada + " sem resposta: conexão com o " + DescricaoTransporte + " encerrada");
         }
     }
 
-    private void SocketError(string mensagem)
+    private void TransporteFalhou(string mensagem)
     {
-        Log("Erro na comunicação com o Web Connection: " + mensagem);
+        Log("Erro na comunicação com o " + DescricaoTransporte + ": " + mensagem);
 
         lock (_lockDados)
         {
@@ -659,7 +585,20 @@ public sealed class GerenciadorSitef : IDisposable
         }
     }
 
-    private void SocketMessage(string mensagem)
+    private bool TransporteRecebeu(string mensagem)
+    {
+        try
+        {
+            return RegistrarRecebida(mensagem);
+        }
+        catch (Exception e)
+        {
+            Log("Erro ao processar mensagem do " + DescricaoTransporte + ": " + e.Message);
+            return false;
+        }
+    }
+
+    private bool RegistrarRecebida(string mensagem)
     {
         Log("RECEBIDO: " + mensagem);
 
@@ -670,6 +609,8 @@ public sealed class GerenciadorSitef : IDisposable
             : TextoDelphi.PareceFinal(mensagem);
         var evento = "";
         var detalhe = "";
+        bool primeira;
+        bool gravado;
 
         lock (_lockDados)
         {
@@ -694,7 +635,7 @@ public sealed class GerenciadorSitef : IDisposable
                     " não é da transação atual (" + (emCurso ? _identAtual : "nenhuma em curso") + "). Registrada em " + Path.GetFileName(arquivo) + ".");
             }
 
-            var primeira = RegistrarMensagem(arquivo, mensagem, json, final && !avulsa, out var registro);
+            primeira = RegistrarMensagem(arquivo, mensagem, json, final && !avulsa, out var registro, out gravado);
 
             if (avulsa)
             {
@@ -735,6 +676,8 @@ public sealed class GerenciadorSitef : IDisposable
             Log(evento + ": " + detalhe);
             Evento(evento, detalhe);
         }
+
+        return gravado;
     }
 
     private void DrenarSinal()
@@ -935,20 +878,20 @@ public sealed class GerenciadorSitef : IDisposable
 
             try
             {
+                var gateway = Gateway;
+
                 try
                 {
-                    await ConectarAsync();
+                    await gateway.ConectarAsync();
                 }
                 catch (Exception e)
                 {
-                    if (!Conectado)
-                        throw new ExcecaoTef(SituacaoTef.NaoEnviada, "Sem comunicação com o Sankhya Web Connection: " + e.Message);
+                    if (!gateway.Conectado)
+                        throw new ExcecaoTef(SituacaoTef.NaoEnviada, "Sem comunicação com o " + NomeCompleto(gateway) + ": " + e.Message);
                 }
 
-                var ws = _socket;
-
-                if (!Conectado || ws is null)
-                    throw new ExcecaoTef(SituacaoTef.NaoEnviada, "Sem comunicação com o Sankhya Web Connection. " +
+                if (!gateway.Conectado)
+                    throw new ExcecaoTef(SituacaoTef.NaoEnviada, "Sem comunicação com o " + NomeCompleto(gateway) + ". " +
                                                                  "Verifique se ele está aberto nesta máquina.");
 
                 lock (_lockDados)
@@ -959,11 +902,15 @@ public sealed class GerenciadorSitef : IDisposable
 
                 try
                 {
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None);
+                    await gateway.EnviarAsync(json);
+                }
+                catch (ExcecaoTef)
+                {
+                    throw;
                 }
                 catch (Exception e)
                 {
-                    throw new ExcecaoTef(SituacaoTef.Indefinida, "Falha ao enviar a transação ao Web Connection: " + e.Message);
+                    throw new ExcecaoTef(SituacaoTef.Indefinida, "Falha ao enviar a transação ao " + gateway.Descricao + ": " + e.Message);
                 }
 
                 var inicio = Stopwatch.StartNew();
@@ -997,7 +944,7 @@ public sealed class GerenciadorSitef : IDisposable
                     }
 
                     if (erro != "")
-                        throw new ExcecaoTef(SituacaoTef.Indefinida, "A comunicação com o Web Connection falhou durante a transação: " + erro);
+                        throw new ExcecaoTef(SituacaoTef.Indefinida, "A comunicação com o " + gateway.Descricao + " falhou durante a transação: " + erro);
 
                     if (pendente)
                     {
