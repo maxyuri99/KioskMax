@@ -25,6 +25,26 @@ static class Program
         try { ConfigManager.CleanupOldLogs(30); } catch { }
         Log.Information("=== KioskController Starting ===");
 
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Log.Error(e.Exception, "Exceção não tratada na interface");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Log.Fatal(e.ExceptionObject as Exception, "Exceção não tratada (encerrando: {Encerrando})", e.IsTerminating);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Log.Error(e.Exception, "Exceção de tarefa não observada");
+            e.SetObserved();
+        };
+
+        if (SinalTefOcupado.OutraInstanciaOcupada())
+        {
+            Log.Warning("Outra instância do KioskMax está com transação TEF em andamento; esta instância não vai encerrá-la");
+            Log.CloseAndFlush();
+            ApplicationConfiguration.Initialize();
+            MessageBox.Show("O KioskMax já está aberto com uma transação TEF em andamento.\n\nAguarde a transação terminar no pinpad e abra o KioskMax de novo se precisar.",
+                "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         var pid = Environment.ProcessId;
         KioskProcessTakeover.KillOtherInstancesSameExe(pid);
         KioskProcessTakeover.KillAllWithImageName("WindowRouter");

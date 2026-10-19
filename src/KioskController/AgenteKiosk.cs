@@ -81,6 +81,8 @@ public sealed class AgenteKiosk : IAsyncDisposable
         var versaoTef = assembly.GetName().Version?.ToString(4) ?? "2.0.0.0";
         Tef = new ServicoTef(versaoTef, mensagem => Log.Information("[TEF] {Mensagem}", mensagem));
         Tef.Evento += AoEventoTef;
+        Tef.OcupadoAlterado += SinalTefOcupado.Marcar;
+        SinalTefOcupado.Marcar(false);
 
         Tef.Atestador = AtestarAsync;
         Tef.InformarCaixa = InformarCaixa;
@@ -1089,6 +1091,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             }
 
             case "REINICIAR_AGENTE":
+                if (Tef.Estado.Ocupado) return (false, "Transação TEF em andamento; o agente não foi reiniciado");
                 return (true, "Reiniciando o agente");
 
             default:

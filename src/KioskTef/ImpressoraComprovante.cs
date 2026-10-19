@@ -14,6 +14,7 @@ public sealed class ImpressoraComprovante
     private const string ComAcento = "áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑºª";
     private const string SemAcento = "aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCNoa";
 
+    private static readonly TimeSpan PrazoImpressao = TimeSpan.FromSeconds(30);
     private readonly object _lockImpressao = new();
     private readonly Func<ConfiguracaoImpressao> _config;
 
@@ -207,9 +208,13 @@ public sealed class ImpressoraComprovante
                 }
             });
 
+            thread.IsBackground = true;
             thread.SetApartmentState(ApartmentState.STA);
             thread.Start();
-            thread.Join();
+
+            if (!thread.Join(PrazoImpressao))
+                throw new TimeoutException("A impressora não respondeu em " + (int)PrazoImpressao.TotalSeconds +
+                                           " segundos. Verifique se ela está ligada, com papel e sem fila travada no Windows.");
 
             if (erro is not null)
                 throw erro;

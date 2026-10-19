@@ -85,6 +85,13 @@ public partial class ControllerForm : Form
 
 				if (result == DialogResult.Yes)
 				{
+					if (!_agente.Tef.TentarReservar())
+					{
+						MessageBox.Show("Há uma transação TEF em andamento. Aguarde terminar no pinpad antes de fechar o KioskMax.",
+							"KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+						return;
+					}
+
 					this.Hide();
 					BeginInvoke(new Action(() => Application.Exit()));
 					return;

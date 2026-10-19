@@ -49,12 +49,53 @@ internal static class TextoDelphi
 
         try
         {
-            return JsonNode.Parse(texto);
+            using var doc = JsonDocument.Parse(texto);
+            return Converter(doc.RootElement);
         }
         catch
         {
             return null;
         }
+    }
+
+    private static JsonNode? Converter(JsonElement elemento)
+    {
+        switch (elemento.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var obj = new JsonObject();
+
+                foreach (var propriedade in elemento.EnumerateObject())
+                    obj[propriedade.Name] = Converter(propriedade.Value);
+
+                return obj;
+            case JsonValueKind.Array:
+                var vetor = new JsonArray();
+
+                foreach (var item in elemento.EnumerateArray())
+                    vetor.Add(Converter(item));
+
+                return vetor;
+            case JsonValueKind.String:
+                return JsonValue.Create(elemento.GetString());
+            case JsonValueKind.Number:
+                return JsonValue.Create(elemento.Clone());
+            case JsonValueKind.True:
+                return JsonValue.Create(true);
+            case JsonValueKind.False:
+                return JsonValue.Create(false);
+            default:
+                return null;
+        }
+    }
+
+    public static bool PareceFinal(string? texto)
+    {
+        if (string.IsNullOrEmpty(texto))
+            return false;
+
+        return texto.Contains("\"retorno\"", StringComparison.OrdinalIgnoreCase) ||
+               texto.Contains("\"erro\"", StringComparison.OrdinalIgnoreCase);
     }
 
     public static JsonObject? InterpretarObjeto(string? texto)

@@ -24,6 +24,8 @@ public sealed class ServicoTef : IAsyncDisposable
 
     public event Action<string, string>? Evento;
 
+    public event Action<bool>? OcupadoAlterado;
+
     public string PastaBase
     {
         get => _gerenciador.Pasta;
@@ -52,6 +54,11 @@ public sealed class ServicoTef : IAsyncDisposable
         _impressora = new ImpressoraComprovante(() => _impressao);
         _gerenciador.AoRegistrar = Registrar;
         _gerenciador.AoMudarConexao = c => Disparar("TEF_WEBCONNECTION", c ? "conectado" : "desconectado");
+        _gerenciador.AoEvento = Disparar;
+        _gerenciador.AoMudarOcupado = o =>
+        {
+            try { OcupadoAlterado?.Invoke(o); } catch { }
+        };
     }
 
     public EstadoTef Estado
@@ -65,6 +72,7 @@ public sealed class ServicoTef : IAsyncDisposable
                     Servidor = _servidor is { Executando: true },
                     WebConnection = _gerenciador.Conectado,
                     Ocupado = _gerenciador.Ocupado,
+                    Pendente = _gerenciador.Pendente,
                     Porta = _porta,
                     Erro = _erro,
                     UltimaIdentificacao = _ultimaIdent,
@@ -74,6 +82,10 @@ public sealed class ServicoTef : IAsyncDisposable
             }
         }
     }
+
+    public bool TentarReservar() => _gerenciador.TentarReservar();
+
+    public void LiberarReserva() => _gerenciador.LiberarReserva();
 
     public static IReadOnlyList<string> ListarImpressoras() => ImpressoraComprovante.ListarImpressoras();
 
@@ -256,16 +268,21 @@ public sealed class ServicoTef : IAsyncDisposable
 
     public async Task<bool> ReiniciarAsync()
     {
-        if (_gerenciador.Ocupado)
+        if (!_gerenciador.TentarReservar())
             return false;
-
-        await _lockCiclo.WaitAsync();
 
         try
         {
-            if (_gerenciador.Ocupado)
-                return false;
+            await _lockCiclo.WaitAsync();
+        }
+        catch
+        {
+            _gerenciador.LiberarReserva();
+            throw;
+        }
 
+        try
+        {
             await PararInternoAsync();
 
             _iniciado = true;
@@ -277,6 +294,7 @@ public sealed class ServicoTef : IAsyncDisposable
         finally
         {
             _lockCiclo.Release();
+            _gerenciador.LiberarReserva();
         }
     }
 

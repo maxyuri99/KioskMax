@@ -9,6 +9,7 @@ public static class SituacaoTef
     public const string NaoEncontrada = "NAO_ENCONTRADA";
     public const string Indefinida = "INDEFINIDA";
     public const string Ocupado = "OCUPADO";
+    public const string JaEnviada = "JA_ENVIADA";
 }
 
 public sealed class ExcecaoTef : Exception

@@ -344,6 +344,22 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void ReiniciarAgente()
 	{
+		if (_isShuttingDown) return;
+
+		if (!_agente.Tef.TentarReservar())
+		{
+			Log.Warning("Reinício do agente adiado: transação TEF em andamento");
+			var espera = new System.Windows.Forms.Timer { Interval = 5000 };
+			espera.Tick += (_, __) =>
+			{
+				espera.Stop();
+				espera.Dispose();
+				ReiniciarAgente();
+			};
+			espera.Start();
+			return;
+		}
+
 		try
 		{
 			Log.Information("Restarting agent by Gestao command");
@@ -359,6 +375,7 @@ public class TrayApplicationContext : ApplicationContext
 		catch (Exception ex)
 		{
 			Log.Error(ex, "Failed to restart agent");
+			_agente.Tef.LiberarReserva();
 		}
 	}
 
@@ -685,9 +702,29 @@ public class TrayApplicationContext : ApplicationContext
 
 	private void Exit_Click(object? sender, EventArgs e)
 	{
+		if (_agente.Tef.Estado.Ocupado)
+		{
+			AvisarTefEmAndamento();
+			return;
+		}
+
 		if (!SenhaLocal.Solicitar(null, "fechar o KioskMax")) return;
+
+		if (!_agente.Tef.TentarReservar())
+		{
+			AvisarTefEmAndamento();
+			return;
+		}
+
 		Log.Information("Exit requested by user");
 		BeginCleanupAndExit();
+	}
+
+	private static void AvisarTefEmAndamento()
+	{
+		Log.Warning("Saída recusada: transação TEF em andamento");
+		MessageBox.Show("Há uma transação TEF em andamento. Aguarde terminar no pinpad antes de fechar o KioskMax.",
+			"KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 	}
 
 	private bool StartWindowRouter()

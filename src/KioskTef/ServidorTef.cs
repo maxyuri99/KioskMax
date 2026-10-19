@@ -358,13 +358,14 @@ internal sealed class ServidorTef
 
         try
         {
-            var resp = await _gerenciador.ExecutarAsync(corpo, _tempoLimite());
+            var resultado = await _gerenciador.ExecutarAsync(corpo, _tempoLimite());
+            var resp = resultado.Texto;
             var obj = TextoDelphi.InterpretarObjeto(resp);
 
             if (obj is not null)
             {
                 var retorno = TextoDelphi.ValorTexto(obj, "retorno");
-                _aoEvento("TEF_RESPOSTA", "ident " + ident + " retorno " + (retorno == "" ? "erro" : retorno));
+                _aoEvento(resultado.Repetida ? "TEF_REPETIDA" : "TEF_RESPOSTA", "ident " + ident + " retorno " + (retorno == "" ? "erro" : retorno));
                 _aoUltima(ident, SituacaoTef.Concluida);
                 await Responder(ctx, 200, resp);
             }
@@ -377,9 +378,10 @@ internal sealed class ServidorTef
         }
         catch (ExcecaoTef e)
         {
-            int status = e.Situacao == SituacaoTef.Ocupado ? 409 : e.Situacao == SituacaoTef.NaoEnviada ? 503 : 504;
+            var recusada = e.Situacao is SituacaoTef.Ocupado or SituacaoTef.EmAndamento or SituacaoTef.JaEnviada;
+            int status = recusada ? 409 : e.Situacao == SituacaoTef.NaoEnviada ? 503 : 504;
 
-            if (e.Situacao != SituacaoTef.Ocupado)
+            if (!recusada)
                 _aoUltima(ident, e.Situacao);
 
             _aoEvento("TEF_ERRO", e.Situacao + ": " + e.Message);
