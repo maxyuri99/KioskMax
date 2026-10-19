@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using KioskTef;
@@ -24,7 +25,7 @@ public enum EstadoGestao
 public sealed class AgenteKiosk : IAsyncDisposable
 {
     private const int MaxEventosPorSinal = 20;
-    private const int MaxEventosFila = 200;
+    private const int MaxEventosFila = 2000;
     private static readonly int[] Recuos = { 5, 10, 20, 30 };
     private static readonly TimeSpan RetencaoComandosExecutados = TimeSpan.FromHours(6);
 
@@ -34,6 +35,9 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private readonly SemaphoreSlim _travaAplicacao = new(1, 1);
     private readonly object _travaEventos = new();
     private readonly List<JsonObject> _eventos = new();
+    private readonly List<JsonObject> _eventosEmEnvio = new();
+    private static readonly string PastaEventos = Path.Combine(ConfigManager.GetConfigDirectory(), "eventos");
+    private static readonly string ArquivoEventos = Path.Combine(PastaEventos, "fila.jsonl");
     private readonly string _versaoApp;
     private Task? _tarefa;
     private string? _token;
@@ -74,6 +78,8 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
     public AgenteKiosk()
     {
+        CarregarEventos();
+
         var assembly = typeof(AgenteKiosk).Assembly;
         var info = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         _versaoApp = (info ?? assembly.GetName().Version?.ToString(3) ?? "2.0.0").Split('+')[0];
@@ -237,14 +243,14 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         if (resposta.PrecisaRecuar)
         {
-            RestaurarEventos(payload);
+            RestaurarEventos();
             DefinirEstado(EstadoGestao.Offline, "Sem comunicação com o Gestão", cfg.UltimaSituacao);
             return ProximoRecuo();
         }
 
         if (resposta.Status == 401)
         {
-            RestaurarEventos(payload);
+            RestaurarEventos();
             Log.Warning("Token do kiosk recusado pelo Gestão; registrando novamente");
             EsquecerToken();
             _aplicadoNaSessao = false;
@@ -253,7 +259,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         if (resposta.Status == 403)
         {
-            RestaurarEventos(payload);
+            RestaurarEventos();
             _indiceRecuo = 0;
             DefinirEstado(EstadoGestao.Bloqueado, "Kiosk bloqueado no Gestão", "BLOQUEADO");
             await AplicarSituacaoNaoAtivaAsync("BLOQUEADO", cfg.KioskContexto?.NmKiosk ?? Environment.MachineName);
@@ -262,12 +268,13 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         if (!resposta.Sucesso || !resposta.TemDados)
         {
-            RestaurarEventos(payload);
+            RestaurarEventos();
             Log.Warning("Resposta inesperada do sinal: {Status} {Erro} {Mensagem}", resposta.Status, resposta.Erro, resposta.Mensagem);
             DefinirEstado(EstadoGestao.Offline, $"Resposta inesperada ({resposta.Status})", cfg.UltimaSituacao);
             return ProximoRecuo();
         }
 
+        ConfirmarEventos();
         _indiceRecuo = 0;
         UltimoSinalEm = DateTimeOffset.Now;
 
@@ -770,7 +777,15 @@ public sealed class AgenteKiosk : IAsyncDisposable
             lock (_travaEventos)
             {
                 _eventos.Add(item);
-                while (_eventos.Count > MaxEventosFila) _eventos.RemoveAt(0);
+                if (_eventos.Count > MaxEventosFila)
+                {
+                    LimitarEventos();
+                    GravarEventos();
+                }
+                else
+                {
+                    AcrescentarEvento(item);
+                }
             }
         }
         catch { }
@@ -781,28 +796,119 @@ public sealed class AgenteKiosk : IAsyncDisposable
         var array = new JsonArray();
         lock (_travaEventos)
         {
+            _eventosEmEnvio.Clear();
             var quantidade = Math.Min(MaxEventosPorSinal, _eventos.Count);
-            for (var i = 0; i < quantidade; i++) array.Add(_eventos[i]);
-            _eventos.RemoveRange(0, quantidade);
+            for (var i = 0; i < quantidade; i++)
+            {
+                _eventosEmEnvio.Add(_eventos[i]);
+                array.Add(_eventos[i].DeepClone());
+            }
         }
         return array;
     }
 
-    private void RestaurarEventos(JsonObject payload)
+    private void RestaurarEventos()
+    {
+        lock (_travaEventos)
+        {
+            _eventosEmEnvio.Clear();
+        }
+    }
+
+    private void ConfirmarEventos()
+    {
+        lock (_travaEventos)
+        {
+            if (_eventosEmEnvio.Count == 0) return;
+            var enviados = new HashSet<JsonObject>(_eventosEmEnvio, ReferenceEqualityComparer.Instance);
+            _eventosEmEnvio.Clear();
+            if (_eventos.RemoveAll(enviados.Contains) > 0) GravarEventos();
+        }
+    }
+
+    private void LimitarEventos()
+    {
+        while (_eventos.Count > MaxEventosFila)
+        {
+            var indice = _eventos.FindIndex(e => !EhEventoTef(e));
+            _eventos.RemoveAt(indice < 0 ? 0 : indice);
+        }
+    }
+
+    private static bool EhEventoTef(JsonObject evento)
     {
         try
         {
-            if (payload["eventos"] is not JsonArray enviados || enviados.Count == 0) return;
-            var itens = enviados.OfType<JsonObject>().ToList();
-            foreach (var i in itens) enviados.Remove(i);
-
-            lock (_travaEventos)
-            {
-                _eventos.InsertRange(0, itens);
-                while (_eventos.Count > MaxEventosFila) _eventos.RemoveAt(0);
-            }
+            return evento["deEvento"]?.GetValue<string>()?.StartsWith("TEF_", StringComparison.OrdinalIgnoreCase) == true;
         }
-        catch { }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void CarregarEventos()
+    {
+        try
+        {
+            if (!File.Exists(ArquivoEventos)) return;
+
+            foreach (var linha in File.ReadLines(ArquivoEventos))
+            {
+                if (string.IsNullOrWhiteSpace(linha)) continue;
+                try
+                {
+                    if (JsonNode.Parse(linha) is JsonObject item && item["deEvento"] != null) _eventos.Add(item);
+                }
+                catch (JsonException) { }
+            }
+
+            LimitarEventos();
+            GravarEventos();
+            if (_eventos.Count > 0) Log.Information("{Quantidade} evento(s) pendente(s) recuperado(s) do disco", _eventos.Count);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Falha ao carregar a fila de eventos do disco");
+        }
+    }
+
+    private void AcrescentarEvento(JsonObject item)
+    {
+        try
+        {
+            Directory.CreateDirectory(PastaEventos);
+            using var fluxo = new FileStream(ArquivoEventos, FileMode.Append, FileAccess.Write, FileShare.Read);
+            var bytes = Encoding.UTF8.GetBytes(item.ToJsonString() + "\n");
+            fluxo.Write(bytes, 0, bytes.Length);
+            fluxo.Flush(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Falha ao gravar evento na fila em disco");
+        }
+    }
+
+    private void GravarEventos()
+    {
+        var temporario = ArquivoEventos + ".tmp";
+        try
+        {
+            Directory.CreateDirectory(PastaEventos);
+            using (var fluxo = new FileStream(temporario, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var escritor = new StreamWriter(fluxo, new UTF8Encoding(false)))
+            {
+                foreach (var item in _eventos) escritor.Write(item.ToJsonString() + "\n");
+                escritor.Flush();
+                fluxo.Flush(true);
+            }
+            File.Move(temporario, ArquivoEventos, true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Falha ao regravar a fila de eventos em disco");
+            try { File.Delete(temporario); } catch { }
+        }
     }
 
     private async Task<JsonObject> MontarSinalAsync(NpsConfig cfg)
