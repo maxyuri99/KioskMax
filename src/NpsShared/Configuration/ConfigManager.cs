@@ -20,6 +20,8 @@ public class ConfigManager
 
     private static readonly object ConfigLock = new();
 
+    public static string? UltimoErroGravacao { get; private set; }
+
     public static string GetLogDirectory() => LogDirectory;
 
     public static string GetConfigDirectory() => ConfigDirectory;
@@ -122,10 +124,12 @@ public class ConfigManager
             var tempPath = ConfigFilePath + ".tmp";
             File.WriteAllText(tempPath, json);
             File.Move(tempPath, ConfigFilePath, true);
+            UltimoErroGravacao = null;
             Log.Debug("Configuration saved to {Path}", ConfigFilePath);
         }
         catch (Exception ex)
         {
+            UltimoErroGravacao = ex.Message;
             Log.Error(ex, "Failed to save configuration");
         }
     }

@@ -65,14 +65,15 @@ Source: "{#SourceBundle}\\run-both*"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceBundle}\\config\\config.sample.json"; DestDir: "{commonappdata}\\UpMais\\NpsKiosk"; DestName: "config.json"; Flags: onlyifdoesntexist
 
 [Dirs]
-Name: "{commonappdata}\\UpMais\\NpsKiosk"; Flags: uninsneveruninstall
+Name: "{commonappdata}\\UpMais"; Permissions: users-modify; Flags: uninsneveruninstall
+Name: "{commonappdata}\\UpMais\\NpsKiosk"; Permissions: users-modify; Flags: uninsneveruninstall
 
 [Icons]
 Name: "{autoprograms}\\KioskMax Controller"; Filename: "{app}\\Controller\\KioskController.exe"; WorkingDir: "{app}\\Controller"; IconFilename: "{app}\\icones\\app.ico"
 Name: "{commondesktop}\\KioskMax Controller"; Filename: "{app}\\Controller\\KioskController.exe"; WorkingDir: "{app}\\Controller"; Tasks: desktopicon; IconFilename: "{app}\\icones\\app.ico"
 
 [Run]
-Filename: "{app}\\Controller\\KioskController.exe"; Description: "Iniciar KioskMax Controller agora"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\\Controller\\KioskController.exe"; Description: "Iniciar KioskMax Controller agora"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Code]
 function WebView2Installed(): Boolean;

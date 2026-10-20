@@ -144,6 +144,16 @@ public partial class ControllerForm
                 c.UltimaSituacao = string.Empty;
                 c.UltimaVersaoConfig = 0;
             });
+
+            if (ConfigManager.UltimoErroGravacao is { } erro)
+            {
+                MessageBox.Show("Não foi possível salvar a configuração do KioskMax:\n" + erro +
+                                "\n\nDê permissão de alteração aos usuários na pasta " + ConfigManager.GetConfigDirectory() +
+                                " (ou reinstale a versão mais nova do KioskMax) e tente de novo.",
+                                "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             _agente.EsquecerToken();
         }
 
