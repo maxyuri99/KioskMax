@@ -18,6 +18,11 @@ public sealed class VinculoGestaoForm : Form
         var cfg = ConfigManager.LoadConfig();
         _urlOriginal = cfg.GestaoApiUrl ?? string.Empty;
 
+        SuspendLayout();
+        // Posições pensadas em 96 DPI; com zoom do Windows tudo é ampliado junto com o texto.
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        Font = new Font("Segoe UI", 9F);
         Text = "KioskMax - Vínculo com o Gestão";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -44,6 +49,8 @@ public sealed class VinculoGestaoForm : Form
         var btnFechar = new Button { Text = "Fechar", Size = new Size(100, 30), Location = new Point(412, 180), DialogResult = DialogResult.Cancel };
 
         Controls.AddRange(new Control[] { lblUrl, _txtUrl, lblId, _txtIdentificador, btnCopiar, _lblSituacao, btnSalvar, btnFechar });
+        ResumeLayout(false);
+        PerformLayout();
         AcceptButton = btnSalvar;
         CancelButton = btnFechar;
 

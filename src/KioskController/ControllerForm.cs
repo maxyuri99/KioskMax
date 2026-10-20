@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Serilog;
 using NpsShared.Configuration;
 using NpsShared.IPC;
@@ -17,15 +17,15 @@ public partial class ControllerForm : Form
     public ControllerForm(AgenteKiosk agente)
     {
         _agente = agente;
+        _config = ConfigManager.LoadConfig();
         InitializeComponent();
+        MinimumSize = Size;
 
         try
         {
             this.Icon = IconLoader.TryLoadIcon(new[] { "kioskcontroller_256.png", "kioskcontroller_128.png", "kioskcontroller_64.png", "kioskcontroller_32.png" });
         }
         catch { }
-
-        _config = ConfigManager.LoadConfig();
 
         var travaLocal = new System.Windows.Forms.Timer { Interval = 1000 };
         travaLocal.Tick += (_, _) =>
@@ -38,18 +38,16 @@ public partial class ControllerForm : Form
         txtUrl.Text = _config.NpsUrl;
         chkRouter.Checked = _config.RouterEnabled;
 
-        cmbRouterFilter.Items.AddRange(new object[] { "Strict", "Relaxed" });
-        var filterMode = string.Equals(_config.RouterWindowFilterMode, "Strict", StringComparison.OrdinalIgnoreCase)
-            ? "Strict"
-            : "Relaxed";
-        cmbRouterFilter.SelectedItem = filterMode;
+        // Índices alinhados com FiltrosRouter: 0 = Relaxed, 1 = Strict.
+        cmbRouterFilter.Items.AddRange(new object[] { "Amplo (recomendado)", "Restrito" });
+        cmbRouterFilter.SelectedIndex = string.Equals(_config.RouterWindowFilterMode, "Strict", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         cmbRouterFilter.SelectedIndexChanged += cmbRouterFilter_SelectedIndexChanged;
 
         chkRouterDebugLogging.Checked = _config.RouterDebugLogging;
         chkRouterDebugLogging.CheckedChanged += chkRouterDebugLogging_CheckedChanged;
 
         PopulateMonitors();
-        InitializeGestaoGroup();
+        AtualizarGestao();
 
         _statusTimer = new System.Windows.Forms.Timer
         {
@@ -113,17 +111,26 @@ public partial class ControllerForm : Form
         try
         {
             var isRunning = await IpcClient.IsDisplayRunningAsync();
-            _lastIsDisplayRunning = isRunning;
-            lblStatus.Text = isRunning ? "Status: ✓ Running" : "Status: ✗ Stopped";
-            btnStartStop.Text = isRunning ? "Stop" : "Start";
+            MostrarSituacaoTela(isRunning);
             AtualizarGestao();
         }
         catch
         {
-            _lastIsDisplayRunning = false;
-            lblStatus.Text = "Status: ✗ Stopped";
-            btnStartStop.Text = "Start";
+            MostrarSituacaoTela(false);
         }
+    }
+
+    private static readonly Color CorOk = Color.FromArgb(22, 128, 61);
+    private static readonly Color CorAviso = Color.FromArgb(180, 110, 0);
+    private static readonly Color CorErro = Color.FromArgb(190, 30, 45);
+    private static readonly string[] FiltrosRouter = { "Relaxed", "Strict" };
+
+    private void MostrarSituacaoTela(bool aberta)
+    {
+        _lastIsDisplayRunning = aberta;
+        lblStatus.Text = aberta ? "● Tela: aberta" : "● Tela: fechada";
+        lblStatus.ForeColor = aberta ? CorOk : CorErro;
+        btnStartStop.Text = aberta ? "Parar tela" : "Iniciar tela";
     }
 
     private void PopulateMonitors()
@@ -133,7 +140,7 @@ public partial class ControllerForm : Form
         for (int i = 0; i < screens.Length; i++)
         {
             var screen = screens[i];
-            var label = $"Monitor {i + 1}: {screen.Bounds.Width}x{screen.Bounds.Height}{(screen.Primary ? " (Primary)" : string.Empty)}";
+            var label = $"Monitor {i + 1}: {screen.Bounds.Width}x{screen.Bounds.Height}{(screen.Primary ? " (principal)" : string.Empty)}";
             cmbMonitors.Items.Add(label);
         }
 
@@ -147,18 +154,18 @@ public partial class ControllerForm : Form
         }
     }
 
-    private void btnOpenLogs_Click(object sender, EventArgs e)
+    private void btnOpenLogs_Click(object? sender, EventArgs e)
     {
         ConfigManager.OpenLogDirectory();
     }
 
-    private void btnOpenConfig_Click(object sender, EventArgs e)
+    private void btnOpenConfig_Click(object? sender, EventArgs e)
     {
         if (!SenhaLocal.Solicitar(this, "abrir a pasta de configuração")) return;
         ConfigManager.OpenConfigDirectory();
     }
 
-    private async void btnStartStop_Click(object sender, EventArgs e)
+    private async void btnStartStop_Click(object? sender, EventArgs e)
     {
         if (!SenhaLocal.Solicitar(this, "iniciar ou parar a tela")) return;
         try
@@ -176,8 +183,8 @@ public partial class ControllerForm : Form
                 var ok = await _agente.Tela.IniciarAsync();
                 if (!ok)
                 {
-                    MessageBox.Show($"KioskBrowser.exe could not be started.\nExpected at:\n{GerenciadorTela.ResolverCaminhoExe()}",
-                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show($"Não foi possível abrir o navegador do kiosk (KioskBrowser.exe).\nEsperado em:\n{GerenciadorTela.ResolverCaminhoExe()}",
+                        "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
 
@@ -186,7 +193,7 @@ public partial class ControllerForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(ex.Message, "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -196,7 +203,7 @@ public partial class ControllerForm : Form
         }
     }
 
-    private async void btnReload_Click(object sender, EventArgs e)
+    private async void btnReload_Click(object? sender, EventArgs e)
     {
         try
         {
@@ -206,12 +213,12 @@ public partial class ControllerForm : Form
             var response = await IpcClient.ReloadAsync();
             if (!response.Success)
             {
-                MessageBox.Show($"Reload failed: {response.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show($"Não foi possível recarregar a página: {response.Message}", "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(ex.Message, "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -221,7 +228,7 @@ public partial class ControllerForm : Form
         }
     }
 
-    private async void btnApplyUrl_Click(object sender, EventArgs e)
+    private async void btnApplyUrl_Click(object? sender, EventArgs e)
     {
         if (!SenhaLocal.Solicitar(this, "trocar o endereço da tela")) return;
         try
@@ -231,7 +238,7 @@ public partial class ControllerForm : Form
             var newUrl = txtUrl.Text?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(newUrl))
             {
-                MessageBox.Show("URL cannot be empty", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("Informe o endereço da página.", "Validação", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -241,7 +248,7 @@ public partial class ControllerForm : Form
                 var response = await IpcClient.SetUrlAsync(newUrl);
                 if (!response.Success)
                 {
-                    MessageBox.Show($"Failed to set URL: {response.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show($"Não foi possível trocar o endereço: {response.Message}", "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 else
                 {
@@ -263,7 +270,7 @@ public partial class ControllerForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(ex.Message, "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -272,7 +279,7 @@ public partial class ControllerForm : Form
         }
     }
 
-    private async void cmbMonitors_SelectedIndexChanged(object sender, EventArgs e)
+    private async void cmbMonitors_SelectedIndexChanged(object? sender, EventArgs e)
     {
         try
         {
@@ -287,7 +294,7 @@ public partial class ControllerForm : Form
                 var response = await IpcClient.SetMonitorAsync(index);
                 if (!response.Success)
                 {
-                    MessageBox.Show($"Failed to set monitor: {response.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show($"Não foi possível trocar o monitor: {response.Message}", "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 else
                 {
@@ -313,7 +320,7 @@ public partial class ControllerForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(ex.Message, "KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -322,7 +329,7 @@ public partial class ControllerForm : Form
         }
     }
 
-    private void chkRouter_CheckedChanged(object sender, EventArgs e)
+    private void chkRouter_CheckedChanged(object? sender, EventArgs e)
     {
         var habilitado = chkRouter.Checked;
         _config = ConfigManager.Update(c => c.RouterEnabled = habilitado);
@@ -330,11 +337,12 @@ public partial class ControllerForm : Form
 
     private void cmbRouterFilter_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        var item = cmbRouterFilter.SelectedItem?.ToString();
-        if (string.IsNullOrEmpty(item))
+        var indice = cmbRouterFilter.SelectedIndex;
+        if (indice < 0 || indice >= FiltrosRouter.Length)
             return;
 
-        _config = ConfigManager.Update(c => c.RouterWindowFilterMode = item);
+        var modo = FiltrosRouter[indice];
+        _config = ConfigManager.Update(c => c.RouterWindowFilterMode = modo);
     }
 
     private void chkRouterDebugLogging_CheckedChanged(object? sender, EventArgs e)

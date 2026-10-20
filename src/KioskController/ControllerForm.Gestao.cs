@@ -7,7 +7,6 @@ namespace KioskController;
 
 public partial class ControllerForm
 {
-    private GroupBox _grpGestao = null!;
     private TextBox _txtGestaoUrl = null!;
     private TextBox _txtIdentificador = null!;
     private Label _lblSituacaoGestao = null!;
@@ -22,54 +21,107 @@ public partial class ControllerForm
     private bool _impressaoCarregada;
     private bool _impressaoControlada;
 
-    private void InitializeGestaoGroup()
+    private TabPage CriarAbaGestao()
     {
-        _grpGestao = new GroupBox
-        {
-            Text = "Gestão / TEF",
-            Location = new Point(16, 320),
-            Size = new Size(528, 284)
-        };
+        var grade = NovaGrade();
 
-        var lblUrl = new Label { AutoSize = true, Text = "URL do Gestão:", Location = new Point(10, 28) };
-        _txtGestaoUrl = new TextBox { Size = new Size(318, 27), Location = new Point(110, 24), Text = _config.GestaoApiUrl };
-        var btnSalvarUrl = new Button { Text = "Salvar", Size = new Size(70, 28), Location = new Point(440, 23) };
+        _txtGestaoUrl = new TextBox { Dock = DockStyle.Fill, Text = _config.GestaoApiUrl };
+        var btnSalvarUrl = NovoBotao("Salvar");
         btnSalvarUrl.Click += BtnSalvarGestaoUrl_Click;
+        Campo(grade, "Endereço do Gestão:", _txtGestaoUrl, btnSalvarUrl,
+            "Endereço da API do Gestão que controla este kiosk (ex.: https://gestaov2.upmais.com.br/api). " +
+            "Em branco, o kiosk funciona sozinho, só com o que está configurado neste computador (modo local).");
 
-        var lblId = new Label { AutoSize = true, Text = "Identificador:", Location = new Point(10, 62) };
-        _txtIdentificador = new TextBox { Size = new Size(318, 27), Location = new Point(110, 58), ReadOnly = true, Text = _config.KioskIdentificador };
-        var btnCopiar = new Button { Text = "Copiar", Size = new Size(70, 28), Location = new Point(440, 57) };
+        _txtIdentificador = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, Text = _config.KioskIdentificador };
+        var btnCopiar = NovoBotao("Copiar");
         btnCopiar.Click += (_, _) =>
         {
             try { Clipboard.SetText(_txtIdentificador.Text); } catch { }
         };
+        Campo(grade, "Identificador:", _txtIdentificador, btnCopiar,
+            "Código único deste computador. No Gestão (Ajustes > Dispositivos > Kiosks), " +
+            "procure por ele para aprovar o kiosk e escolher o caixa e a tela que ele mostra.");
 
-        _lblSituacaoGestao = new Label { AutoSize = false, Size = new Size(508, 54), Location = new Point(10, 92) };
-        _lblTef = new Label { AutoSize = false, Size = new Size(508, 20), Location = new Point(10, 150) };
-
-        var lblImpressora = new Label { AutoSize = true, Text = "Impressora:", Location = new Point(10, 184) };
-        _cmbImpressora = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Size = new Size(250, 28), Location = new Point(90, 180) };
-        var lblModo = new Label { AutoSize = true, Text = "Modo:", Location = new Point(352, 184) };
-        _cmbModoImpressao = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Size = new Size(110, 28), Location = new Point(400, 180) };
-        _cmbModoImpressao.Items.AddRange(new object[] { "RAW", "Driver" });
-
-        _chkViaCliente = new CheckBox { AutoSize = true, Text = "Via do cliente", Location = new Point(10, 216) };
-        _chkViaEstabelecimento = new CheckBox { AutoSize = true, Text = "Via do estabelecimento", Location = new Point(130, 216) };
-        _chkCortarPapel = new CheckBox { AutoSize = true, Text = "Cortar papel", Location = new Point(310, 216) };
-
-        _btnSalvarImpressao = new Button { Text = "Salvar impressão", Size = new Size(130, 30), Location = new Point(10, 246) };
-        _btnSalvarImpressao.Click += BtnSalvarImpressao_Click;
-        var btnTeste = new Button { Text = "Imprimir teste TEF", Size = new Size(140, 30), Location = new Point(150, 246) };
-        btnTeste.Click += BtnImprimirTeste_Click;
-        _lblControladoGestao = new Label { AutoSize = true, Text = "Definido pelo Gestão", ForeColor = Color.DarkRed, Location = new Point(304, 253), Visible = false };
-
-        _grpGestao.Controls.AddRange(new Control[]
+        Secao(grade, "Situação do vínculo");
+        _lblSituacaoGestao = new Label
         {
-            lblUrl, _txtGestaoUrl, btnSalvarUrl, lblId, _txtIdentificador, btnCopiar,
-            _lblSituacaoGestao, _lblTef, lblImpressora, _cmbImpressora, lblModo, _cmbModoImpressao,
-            _chkViaCliente, _chkViaEstabelecimento, _chkCortarPapel, _btnSalvarImpressao, btnTeste, _lblControladoGestao
-        });
-        Controls.Add(_grpGestao);
+            AutoSize = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
+            BackColor = Color.WhiteSmoke,
+            Padding = new Padding(10, 8, 10, 8),
+            Margin = new Padding(3, 0, 3, 6)
+        };
+        var linha = NovaLinha(grade);
+        grade.Controls.Add(_lblSituacaoGestao, 0, linha);
+        grade.SetColumnSpan(_lblSituacaoGestao, 3);
+        Dica(grade,
+            "Online: o kiosk conversa com o Gestão e segue o que foi definido lá. " +
+            "Aguardando aprovação: falta aprovar o identificador no Gestão. " +
+            "Offline: sem resposta do Gestão; o kiosk continua com a última configuração recebida.");
+
+        return NovaAba("Gestão", grade);
+    }
+
+    private TabPage CriarAbaTef()
+    {
+        var grade = NovaGrade();
+
+        Secao(grade, "Situação do TEF");
+        _lblTef = new Label
+        {
+            AutoSize = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
+            BackColor = Color.WhiteSmoke,
+            Padding = new Padding(10, 8, 10, 8),
+            Margin = new Padding(3, 0, 3, 6)
+        };
+        var linha = NovaLinha(grade);
+        grade.Controls.Add(_lblTef, 0, linha);
+        grade.SetColumnSpan(_lblTef, 3);
+        Dica(grade,
+            "O KioskMax recebe os pagamentos com cartão do PDV e conversa com o pinpad pelo SiTef (Web Connection). " +
+            "Com transação em andamento, não feche o KioskMax.");
+
+        Secao(grade, "Comprovante do cartão");
+
+        _cmbImpressora = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Dock = DockStyle.Fill };
+        Campo(grade, "Impressora:", _cmbImpressora, null,
+            "Impressora onde sai o comprovante do TEF. Pode escolher da lista ou digitar o nome exato do Windows.");
+
+        _cmbModoImpressao = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+        // A ordem importa: índice 0 = RAW, 1 = Driver.
+        _cmbModoImpressao.Items.AddRange(new object[] { "RAW (direto na impressora térmica)", "Driver do Windows" });
+        Campo(grade, "Modo de impressão:", _cmbModoImpressao, null,
+            "RAW manda o texto direto para a impressora térmica (mais rápido). " +
+            "Use Driver se o comprovante sair em branco ou com caracteres estranhos.");
+
+        _chkViaCliente = new CheckBox { AutoSize = true, Text = "Via do cliente", Margin = new Padding(0, 3, 16, 3) };
+        _chkViaEstabelecimento = new CheckBox { AutoSize = true, Text = "Via do estabelecimento", Margin = new Padding(0, 3, 16, 3) };
+        _chkCortarPapel = new CheckBox { AutoSize = true, Text = "Cortar papel", Margin = new Padding(0, 3, 16, 3) };
+        var vias = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 0) };
+        vias.Controls.AddRange(new Control[] { _chkViaCliente, _chkViaEstabelecimento, _chkCortarPapel });
+        Campo(grade, "Imprimir:", vias, null,
+            "Quais vias do comprovante saem na impressora e se ela corta o papel no final.");
+
+        _btnSalvarImpressao = NovoBotao("Salvar impressão");
+        _btnSalvarImpressao.Margin = new Padding(0, 2, 6, 2);
+        _btnSalvarImpressao.Click += BtnSalvarImpressao_Click;
+        var btnTeste = NovoBotao("Imprimir teste");
+        btnTeste.Margin = new Padding(0, 2, 6, 2);
+        btnTeste.Click += BtnImprimirTeste_Click;
+        _lblControladoGestao = new Label
+        {
+            AutoSize = true,
+            Text = "Definido pelo Gestão: altere por lá.",
+            ForeColor = Color.DarkRed,
+            Margin = new Padding(6, 8, 0, 0),
+            Visible = false
+        };
+        var acoes = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = new Padding(3, 4, 3, 0) };
+        acoes.Controls.AddRange(new Control[] { _btnSalvarImpressao, btnTeste, _lblControladoGestao });
+        linha = NovaLinha(grade);
+        grade.Controls.Add(acoes, 0, linha);
+        grade.SetColumnSpan(acoes, 3);
 
         try
         {
@@ -80,7 +132,7 @@ public partial class ControllerForm
             Log.Warning(ex, "Falha ao listar impressoras");
         }
 
-        AtualizarGestao();
+        return NovaAba("TEF e impressão", grade);
     }
 
     private void CarregarImpressaoNaTela(ConfiguracaoImpressao config)
@@ -94,20 +146,36 @@ public partial class ControllerForm
 
     private void AtualizarGestao()
     {
-        if (_grpGestao == null) return;
+        if (_lblSituacaoGestao == null) return;
 
         var controlado = _agente.ControladoPeloGestao;
+        var textoGestao = TrayApplicationContext.TextoGestao(_agente);
+        var textoTef = TrayApplicationContext.TextoTef(_agente);
 
         var linhas = new List<string>
         {
-            $"Situação: {TrayApplicationContext.TextoGestao(_agente)}"
+            $"Situação: {textoGestao}"
                 + (string.IsNullOrEmpty(_agente.MensagemEstado) ? "" : $" - {_agente.MensagemEstado}"),
             "Último sinal: " + (_agente.UltimoSinalEm.HasValue ? _agente.UltimoSinalEm.Value.LocalDateTime.ToString("dd/MM/yyyy HH:mm:ss") : "-"),
-            "Caixa: " + (string.IsNullOrEmpty(_agente.DescricaoCaixa) ? "-" : _agente.DescricaoCaixa)
-                + "   Tela: " + (string.IsNullOrEmpty(_agente.NomeTela) ? "-" : _agente.NomeTela)
+            "Caixa: " + (string.IsNullOrEmpty(_agente.DescricaoCaixa) ? "-" : _agente.DescricaoCaixa),
+            "Tela: " + (string.IsNullOrEmpty(_agente.NomeTela) ? "-" : _agente.NomeTela)
         };
         _lblSituacaoGestao.Text = string.Join("\n", linhas);
-        _lblTef.Text = "TEF: " + TrayApplicationContext.TextoTef(_agente);
+        _lblTef.Text = "TEF: " + textoTef;
+
+        lblResumoGestao.Text = "● Gestão: " + (_agente.Estado == EstadoGestao.Desativado ? "modo local" : textoGestao);
+        lblResumoGestao.ForeColor = _agente.Estado switch
+        {
+            EstadoGestao.Online => CorOk,
+            EstadoGestao.Offline or EstadoGestao.Bloqueado or EstadoGestao.Recusado => CorErro,
+            EstadoGestao.Desativado => SystemColors.GrayText,
+            _ => CorAviso
+        };
+        lblResumoTef.Text = "● TEF: " + textoTef;
+        lblResumoTef.ForeColor = textoTef.StartsWith("ativo", StringComparison.Ordinal) ? CorOk
+            : textoTef == "desativado" ? SystemColors.GrayText
+            : textoTef == "iniciando..." ? CorAviso
+            : CorErro;
 
         if (!_impressaoCarregada || _impressaoControlada != controlado)
         {

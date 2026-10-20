@@ -129,6 +129,10 @@ public static class SenhaLocal
 
         public SenhaLocalForm(string acao)
         {
+            SuspendLayout();
+            // Posições pensadas em 96 DPI; com zoom do Windows tudo é ampliado junto com o texto.
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             Text = "KioskMax - senha local";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
@@ -158,6 +162,8 @@ public static class SenhaLocal
             var cancelar = new Button { Text = "Cancelar", DialogResult = DialogResult.Cancel, Location = new Point(286, 104), Size = new Size(80, 30) };
 
             Controls.AddRange(new Control[] { rotulo, _senha, ok, cancelar });
+            ResumeLayout(false);
+            PerformLayout();
             AcceptButton = ok;
             CancelButton = cancelar;
             Shown += (_, _) =>
