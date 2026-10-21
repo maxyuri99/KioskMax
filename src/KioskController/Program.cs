@@ -35,6 +35,13 @@ static class Program
             e.SetObserved();
         };
 
+        using var instancia = InstanciaUnica.Obter();
+        if (!instancia.Primeira && instancia.OutraRespondeu())
+        {
+            Log.CloseAndFlush();
+            return;
+        }
+
         if (SinalTefOcupado.OutraInstanciaOcupada())
         {
             Log.Warning("Outra instância do KioskMax está com transação TEF em andamento; esta instância não vai encerrá-la");
@@ -47,6 +54,7 @@ static class Program
 
         var pid = Environment.ProcessId;
         KioskProcessTakeover.KillOtherInstancesSameExe(pid);
+        if (!instancia.Primeira) instancia.Assumir();
         KioskProcessTakeover.KillAllWithImageName("WindowRouter");
         KioskProcessTakeover.KillAllWithImageName("KioskBrowser");
         KioskProcessTakeover.KillAllWithImageName("NpsDisplay");
@@ -55,7 +63,9 @@ static class Program
         try
         {
             ApplicationConfiguration.Initialize();
-            Application.Run(new TrayApplicationContext());
+            var contexto = new TrayApplicationContext();
+            instancia.AoSerChamada(contexto.AtenderOutraAbertura);
+            Application.Run(contexto);
         }
         catch (Exception ex)
         {

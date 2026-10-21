@@ -62,48 +62,19 @@ public partial class ControllerForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // Prevent accidental exit via 'X' while components are running
         if (e.CloseReason == CloseReason.UserClosing)
         {
-            // Evita deadlock: não chamar async .GetResult() no thread de UI
-            var displayRunning = _lastIsDisplayRunning;
-            var routerRunning = false;
-            try { routerRunning = Process.GetProcessesByName("WindowRouter").Length > 0; } catch { }
-
-			if (displayRunning || routerRunning)
-			{
-				var result = MessageBox.Show(
-					"Sair encerra o navegador Kiosk e o Window Router.\n\nConfirma encerrar tudo?",
-					"KioskMax",
-					MessageBoxButtons.YesNo,
-					MessageBoxIcon.Question,
-					MessageBoxDefaultButton.Button2);
-
-				e.Cancel = true;
-
-				if (result == DialogResult.Yes)
-				{
-					if (!_agente.Tef.TentarReservar())
-					{
-						MessageBox.Show("Há uma transação TEF em andamento. Aguarde terminar no pinpad antes de fechar o KioskMax.",
-							"KioskMax", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-						return;
-					}
-
-					this.Hide();
-					BeginInvoke(new Action(() => Application.Exit()));
-					return;
-				}
-
-				return;
-			}
-
-            // Default: hide instead of close
             e.Cancel = true;
-            this.Hide();
+            Ocultar();
             return;
         }
         base.OnFormClosing(e);
+    }
+
+    public void Ocultar()
+    {
+        Hide();
+        SenhaLocal.Bloquear();
     }
 
     private async Task UpdateStatusAsync()

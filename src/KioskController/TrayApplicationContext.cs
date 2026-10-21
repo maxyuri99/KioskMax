@@ -18,6 +18,8 @@ public class TrayApplicationContext : ApplicationContext
 	private NpsConfig _config;
 	private SynchronizationContext? _uiContext;
 	private bool _isShuttingDown;
+	private readonly DateTime _iniciadoEm = DateTime.UtcNow;
+	private readonly SynchronizationContext _sincronizacao;
 
 	private ToolStripMenuItem _startStopMenuItem = null!;
 	private ToolStripMenuItem _statusMenuItem = null!;
@@ -40,6 +42,7 @@ public class TrayApplicationContext : ApplicationContext
 
 		// Create context menu
 		_contextMenu = new ContextMenuStrip();
+		_sincronizacao = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 		BuildContextMenu();
 
 		// Create tray icon
@@ -656,6 +659,32 @@ public class TrayApplicationContext : ApplicationContext
 		ShowController();
 	}
 
+	private void AlternarController()
+	{
+		if (_controllerForm is { IsDisposed: false, Visible: true })
+		{
+			_controllerForm.Ocultar();
+			return;
+		}
+		ShowController();
+	}
+
+	public void AtenderOutraAbertura()
+	{
+		if (DateTime.UtcNow - _iniciadoEm < TimeSpan.FromMinutes(1)) return;
+		_sincronizacao.Post(_ =>
+		{
+			try
+			{
+				_trayIcon.ShowBalloonTip(6000, "KioskMax", "O KioskMax já está aberto. Use Ctrl+Alt+K para abrir o controle.", ToolTipIcon.Info);
+			}
+			catch (Exception ex)
+			{
+				Log.Warning(ex, "Falha ao avisar que o KioskMax já está aberto");
+			}
+		}, null);
+	}
+
 	private void ShowController()
 	{
 		if (!SenhaLocal.Solicitar(null, "abrir o controle do kiosk")) return;
@@ -896,7 +925,7 @@ public class TrayApplicationContext : ApplicationContext
 		{
 			Log.Information("Global hotkey received: {Id}", args.HotkeyId);
 			if (args.HotkeyId == 1)
-				ShowController();
+				AlternarController();
 			else if (args.HotkeyId == 2 && SenhaLocal.Solicitar(null, "alternar a tela sempre visível"))
 				_ = Task.Run(async () =>
 				{
