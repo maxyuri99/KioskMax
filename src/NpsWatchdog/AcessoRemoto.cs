@@ -100,7 +100,7 @@ public sealed class AcessoRemoto : IDisposable
             await ConfigurarAsync(servidor, chavePublica, ct);
 
             string? senha = null;
-            if (!temSenha)
+            if (!temSenha || !RustDesk.TemSenhaPermanente())
             {
                 senha = GerarSenha();
                 if (!await RustDesk.DefinirSenhaAsync(senha, ct))

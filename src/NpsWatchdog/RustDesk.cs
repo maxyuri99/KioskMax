@@ -48,6 +48,29 @@ public static class RustDesk
         }
     }
 
+    public static bool TemSenhaPermanente()
+    {
+        try
+        {
+            var arquivo = Path.Combine(Path.GetDirectoryName(ArquivoConfig) ?? string.Empty, "RustDesk.toml");
+            if (!File.Exists(arquivo)) return false;
+            foreach (var bruta in File.ReadLines(arquivo))
+            {
+                var linha = bruta.Trim();
+                if (linha.StartsWith('[')) break;
+                if (!linha.StartsWith("password", StringComparison.Ordinal)) continue;
+                var igual = linha.IndexOf('=');
+                if (igual <= 0 || linha[..igual].Trim() != "password") continue;
+                return linha[(igual + 1)..].Trim().Trim('\'', '"').Length > 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Falha ao conferir a senha permanente do RustDesk");
+        }
+        return false;
+    }
+
     public static Dictionary<string, string> LerOpcoes()
     {
         var opcoes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
