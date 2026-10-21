@@ -122,7 +122,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ErrCode: Integer;
 begin
-  if not WebView2Installed() then
+  if not WebView2Installed() and not WizardSilent() then
   begin
     if MsgBox('O Microsoft WebView2 Runtime não foi detectado. Ele é necessário para o Display funcionar. Deseja abrir a página de instalação agora?', mbConfirmation, MB_YESNO) = IDYES then
     begin
@@ -132,10 +132,26 @@ begin
   Result := '';
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+procedure AplicarUrlGestao();
 var
   Url, ConfigPath, Conteudo: String;
   Ansi: AnsiString;
+begin
+  Url := Trim(ExpandConstant('{param:GESTAOURL|}'));
+  if Url = '' then Exit;
+  ConfigPath := ExpandConstant('{commonappdata}\UpMais\NpsKiosk\config.json');
+  if not LoadStringFromFile(ConfigPath, Ansi) then Exit;
+  Conteudo := String(Ansi);
+  if Pos('"GestaoApiUrl": ""', Conteudo) > 0 then
+    StringChangeEx(Conteudo, '"GestaoApiUrl": ""', '"GestaoApiUrl": "' + Url + '"', True)
+  else if Pos('"gestaoApiUrl": ""', Conteudo) > 0 then
+    StringChangeEx(Conteudo, '"gestaoApiUrl": ""', '"gestaoApiUrl": "' + Url + '"', True)
+  else if (Pos('"gestaoApiUrl"', Conteudo) = 0) and (Pos('"GestaoApiUrl"', Conteudo) = 0) then
+    StringChangeEx(Conteudo, '{', '{' + #13#10 + '  "gestaoApiUrl": "' + Url + '",', False);
+  SaveStringToFile(ConfigPath, AnsiString(Conteudo), False);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
@@ -143,15 +159,6 @@ begin
     Exit;
   end;
   if CurStep <> ssPostInstall then Exit;
+  AplicarUrlGestao();
   InstalarServico();
-  Url := Trim(ExpandConstant('{param:GESTAOURL|}'));
-  if Url = '' then Exit;
-  ConfigPath := ExpandConstant('{commonappdata}\UpMais\NpsKiosk\config.json');
-  if not LoadStringFromFile(ConfigPath, Ansi) then Exit;
-  Conteudo := String(Ansi);
-  if Pos('"gestaoApiUrl": ""', Conteudo) > 0 then
-    StringChangeEx(Conteudo, '"gestaoApiUrl": ""', '"gestaoApiUrl": "' + Url + '"', True)
-  else if Pos('"gestaoApiUrl"', Conteudo) = 0 then
-    StringChangeEx(Conteudo, '{', '{' + #13#10 + '  "gestaoApiUrl": "' + Url + '",', False);
-  SaveStringToFile(ConfigPath, AnsiString(Conteudo), False);
 end;
