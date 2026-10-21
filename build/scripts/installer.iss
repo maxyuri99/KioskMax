@@ -75,7 +75,38 @@ Name: "{commondesktop}\\KioskMax Controller"; Filename: "{app}\\Controller\\Kios
 [Run]
 Filename: "{app}\\Controller\\KioskController.exe"; Description: "Iniciar KioskMax Controller agora"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
+[UninstallRun]
+Filename: "{sys}\\net.exe"; Parameters: "stop NpsWatchdog"; Flags: runhidden waituntilterminated; RunOnceId: "PararServico"
+Filename: "{sys}\\sc.exe"; Parameters: "delete NpsWatchdog"; Flags: runhidden waituntilterminated; RunOnceId: "RemoverServico"
+
 [Code]
+procedure ExecutarOculto(const Programa, Parametros: String);
+var
+  Codigo: Integer;
+begin
+  if not Exec(ExpandConstant('{sys}\') + Programa, Parametros, '', SW_HIDE, ewWaitUntilTerminated, Codigo) then
+    Log('Falha ao executar ' + Programa + ' ' + Parametros)
+  else
+    Log(Programa + ' ' + Parametros + ' -> ' + IntToStr(Codigo));
+end;
+
+procedure PararServico();
+begin
+  ExecutarOculto('net.exe', 'stop NpsWatchdog');
+end;
+
+procedure InstalarServico();
+var
+  Caminho: String;
+begin
+  Caminho := ExpandConstant('{app}\Watchdog\NpsWatchdog.exe');
+  ExecutarOculto('sc.exe', 'create NpsWatchdog binPath= "\"' + Caminho + '\"" start= auto DisplayName= "KioskMax Serviço"');
+  ExecutarOculto('sc.exe', 'config NpsWatchdog binPath= "\"' + Caminho + '\"" start= auto obj= LocalSystem DisplayName= "KioskMax Serviço"');
+  ExecutarOculto('sc.exe', 'description NpsWatchdog "Instala e mantém o acesso remoto do KioskMax"');
+  ExecutarOculto('sc.exe', 'failure NpsWatchdog reset= 86400 actions= restart/60000/restart/60000/restart/60000');
+  ExecutarOculto('net.exe', 'start NpsWatchdog');
+end;
+
 function WebView2Installed(): Boolean;
 var
   Value: String;
@@ -106,7 +137,13 @@ var
   Url, ConfigPath, Conteudo: String;
   Ansi: AnsiString;
 begin
+  if CurStep = ssInstall then
+  begin
+    PararServico();
+    Exit;
+  end;
   if CurStep <> ssPostInstall then Exit;
+  InstalarServico();
   Url := Trim(ExpandConstant('{param:GESTAOURL|}'));
   if Url = '' then Exit;
   ConfigPath := ExpandConstant('{commonappdata}\UpMais\NpsKiosk\config.json');

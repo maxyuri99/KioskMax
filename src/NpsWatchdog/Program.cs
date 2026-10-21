@@ -10,7 +10,6 @@ public class Program
 {
     public static void Main(string[] args)
     {
-        // Initialize logging
         var logPath = Path.Combine(ConfigManager.GetLogDirectory(), "NpsWatchdog-.log");
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Is(NivelLog.Ler())
@@ -46,7 +45,6 @@ public class Program
             .UseSerilog()
             .ConfigureServices((hostContext, services) =>
             {
-                services.AddHostedService<WatchdogWorker>();
+                services.AddHostedService<ServicoKiosk>();
             });
 }
-

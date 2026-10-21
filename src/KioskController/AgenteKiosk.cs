@@ -49,6 +49,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private IReadOnlyList<string> _impressoras = Array.Empty<string>();
     private DateTime _ultimaReinicializacaoTela = DateTime.MinValue;
     private readonly LeitoraKiosk _leitora;
+    private bool? _umMonitor;
 
     public GerenciadorTela Tela { get; } = new();
     public ServicoTef Tef { get; }
@@ -88,7 +89,9 @@ public sealed class AgenteKiosk : IAsyncDisposable
         Tef = new ServicoTef(versaoTef, mensagem => Log.Information("[TEF] {Mensagem}", mensagem));
         Tef.Evento += AoEventoTef;
         Tef.OcupadoAlterado += SinalTefOcupado.Marcar;
+        Tef.OcupadoAlterado += ArquivoTefOcupado.Marcar;
         SinalTefOcupado.Marcar(false);
+        ArquivoTefOcupado.Marcar(false);
 
         Tef.Atestador = AtestarAsync;
         Tef.InformarCaixa = InformarCaixa;
@@ -188,7 +191,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
         var cfg = ConfigManager.LoadConfig();
         if (string.IsNullOrWhiteSpace(cfg.GestaoApiUrl))
         {
-            if (cfg.RouterEnabled)
+            if (cfg.RouterEnabled && !UmMonitor)
             {
                 try { Tela.IniciarRoteador(); } catch (Exception ex) { Log.Error(ex, "Failed to auto-start WindowRouter"); }
             }
@@ -196,7 +199,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             if (cfg.AutoRecover && !Tela.EstaRodando)
             {
                 await Task.Delay(1000);
-                await Tela.IniciarAsync(false);
+                await AbrirTelaAsync(false);
             }
             return;
         }
@@ -209,12 +212,66 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         if (cfg.GestaoExibir)
         {
+            await AbrirTelaAsync(cfg.RouterEnabled);
+        }
+    }
+
+    private static bool UmMonitor => Screen.AllScreens.Length < 2;
+
+    private static bool DeveExibirTela(NpsConfig cfg) =>
+        string.IsNullOrWhiteSpace(cfg.GestaoApiUrl)
+            ? cfg.AutoRecover
+            : !string.IsNullOrEmpty(cfg.UltimaSituacao) && cfg.GestaoExibir;
+
+    private async Task<bool> AbrirTelaAsync(bool comRoteador)
+    {
+        if (UmMonitor)
+        {
+            if (Tela.EstaRodando || Tela.RoteadorRodando) await Tela.PararAsync();
+            Log.Information("Só um monitor conectado: a tela do cliente não será aberta");
+            return false;
+        }
+        return await Tela.IniciarAsync(comRoteador);
+    }
+
+    private async Task VigiarMonitoresAsync()
+    {
+        var umMonitor = UmMonitor;
+        var anterior = _umMonitor;
+        _umMonitor = umMonitor;
+
+        if (umMonitor)
+        {
+            if (anterior != true) Enfileirar("TELA_UM_MONITOR", "Só um monitor conectado: a tela do cliente fica fechada");
+            if (Tela.EstaRodando || Tela.RoteadorRodando)
+            {
+                Log.Information("Só um monitor conectado: fechando a tela do cliente e o roteador");
+                await Tela.PararAsync();
+            }
+            return;
+        }
+
+        if (anterior != true) return;
+
+        Enfileirar("TELA_MONITORES_RESTAURADOS", $"{Screen.AllScreens.Length} monitores conectados");
+        var cfg = ConfigManager.LoadConfig();
+        if (DeveExibirTela(cfg) && !Tela.EstaRodando)
+        {
             await Tela.IniciarAsync(cfg.RouterEnabled);
         }
     }
 
     private async Task<int> CicloAsync(CancellationToken ct)
     {
+        try
+        {
+            await VigiarMonitoresAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Falha ao conferir os monitores");
+        }
+
         var cfg = ConfigManager.LoadConfig();
         var url = cfg.GestaoApiUrl?.Trim() ?? string.Empty;
 
@@ -508,7 +565,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             }
             else
             {
-                await Tela.IniciarAsync(cfg.RouterEnabled);
+                await AbrirTelaAsync(cfg.RouterEnabled);
             }
 
             Enfileirar("CONFIG_APLICADA", $"Situação {situacao}");
@@ -680,6 +737,12 @@ public sealed class AgenteKiosk : IAsyncDisposable
             return;
         }
 
+        if (UmMonitor)
+        {
+            if (Tela.EstaRodando || Tela.RoteadorRodando) await Tela.PararAsync();
+            return;
+        }
+
         if (!Tela.EstaRodando)
         {
             await Tela.IniciarAsync(cfg.RouterEnabled);
@@ -757,7 +820,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
                 _ultimaReinicializacaoTela = DateTime.UtcNow;
                 Log.Warning("Reiniciando a tela após encerramento inesperado ({Motivo})", motivo);
-                await Tela.IniciarAsync(cfg.RouterEnabled);
+                await AbrirTelaAsync(cfg.RouterEnabled);
             }
             catch (Exception ex)
             {
@@ -984,6 +1047,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
                 ["ultimaEm"] = _leitora.UltimaEm?.ToString("yyyy-MM-ddTHH:mm:sszzz")
             },
             ["monitores"] = monitores,
+            ["umMonitor"] = telas.Length < 2,
             ["impressoras"] = impressoras,
             ["eventos"] = RetirarEventos()
         };
@@ -1182,6 +1246,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             case "REINICIAR_TELA":
             {
                 await Tela.PararAsync(false);
+                if (UmMonitor) return (false, "Só um monitor conectado: a tela do cliente fica fechada");
                 var ok = await Tela.IniciarAsync(false);
                 return (ok, ok ? "Tela reiniciada" : "Falha ao iniciar a tela");
             }
@@ -1190,6 +1255,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             {
                 await Tela.PararAsync(false);
                 var apagou = await Task.Run(GerenciadorTela.ApagarCacheWebView);
+                if (UmMonitor) return (apagou, "Cache tratado; só um monitor conectado, a tela do cliente fica fechada");
                 var ok = await Tela.IniciarAsync(false);
                 if (!ok) return (false, "Cache tratado, mas falhou ao abrir a tela");
                 return (apagou, apagou ? "Cache apagado e tela reiniciada" : "Não foi possível apagar todo o cache; tela reiniciada");
