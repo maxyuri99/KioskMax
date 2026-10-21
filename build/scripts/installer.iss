@@ -72,6 +72,9 @@ Name: "{commonappdata}\\UpMais\\NpsKiosk"; Permissions: users-modify; Flags: uni
 Name: "{autoprograms}\\KioskMax Controller"; Filename: "{app}\\Controller\\KioskController.exe"; WorkingDir: "{app}\\Controller"; IconFilename: "{app}\\icones\\app.ico"
 Name: "{commondesktop}\\KioskMax Controller"; Filename: "{app}\\Controller\\KioskController.exe"; WorkingDir: "{app}\\Controller"; Tasks: desktopicon; IconFilename: "{app}\\icones\\app.ico"
 
+[Registry]
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "KioskMax"; ValueData: """{app}\Controller\KioskController.exe"""; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\\Controller\\KioskController.exe"; Description: "Iniciar KioskMax Controller agora"; Flags: nowait postinstall skipifsilent runasoriginaluser
 

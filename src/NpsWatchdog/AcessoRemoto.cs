@@ -1,48 +1,26 @@
-using System.Net;
-using System.Net.Http.Headers;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text.Json;
 using NpsShared.Utilities;
 using Serilog;
 
 namespace NpsWatchdog;
 
-public sealed class AcessoRemoto : IDisposable
+public sealed class AcessoRemoto
 {
     private const string CaracteresSenha = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     private static readonly TimeSpan IntervaloInforme = TimeSpan.FromHours(6);
 
     private readonly ClienteGestaoServico _gestao;
-    private readonly HttpClient _download = new() { Timeout = TimeSpan.FromMinutes(15) };
+    private readonly Baixador _baixador;
     private string _ultimoMotivo = string.Empty;
     private string _ultimoInformado = string.Empty;
     private DateTime _informadoEm = DateTime.MinValue;
     private string _ultimoErro = string.Empty;
 
-    public AcessoRemoto(ClienteGestaoServico gestao)
+    public AcessoRemoto(ClienteGestaoServico gestao, Baixador baixador)
     {
         _gestao = gestao;
-    }
-
-    private static string PastaProtegida
-    {
-        get
-        {
-            var pasta = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "UpMais", "KioskServico");
-            var seguranca = new DirectorySecurity();
-            seguranca.SetAccessRuleProtection(true, false);
-            foreach (var conta in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
-            {
-                seguranca.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(conta, null), FileSystemRights.FullControl,
-                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-            }
-            var info = new DirectoryInfo(pasta);
-            if (!info.Exists) info.Create(seguranca);
-            else info.SetAccessControl(seguranca);
-            return pasta;
-        }
+        _baixador = baixador;
     }
 
     public async Task ExecutarAsync(CancellationToken ct)
@@ -61,18 +39,18 @@ public sealed class AcessoRemoto : IDisposable
         }
 
         var ordem = resposta.Dados;
-        if (!Booleano(ordem, "instalar"))
+        if (!LeituraJson.Booleano(ordem, "instalar"))
         {
             Anotar("Acesso remoto não liberado para este kiosk no Gestão");
             return;
         }
 
-        var versao = Texto(ordem, "versao");
-        var url = Texto(ordem, "url");
-        var sha256 = Texto(ordem, "sha256").ToLowerInvariant();
-        var servidor = Texto(ordem, "servidor");
-        var chavePublica = Texto(ordem, "chavePublica");
-        var temSenha = Booleano(ordem, "temSenha");
+        var versao = LeituraJson.Texto(ordem, "versao");
+        var url = LeituraJson.Texto(ordem, "url");
+        var sha256 = LeituraJson.Texto(ordem, "sha256").ToLowerInvariant();
+        var servidor = LeituraJson.Texto(ordem, "servidor");
+        var chavePublica = LeituraJson.Texto(ordem, "chavePublica");
+        var temSenha = LeituraJson.Booleano(ordem, "temSenha");
 
         try
         {
@@ -86,10 +64,11 @@ public sealed class AcessoRemoto : IDisposable
                 }
 
                 Log.Information("Instalando o RustDesk {Versao} (instalado: {Instalada})", versao, instalada ?? "nenhum");
-                var instalador = await BaixarAsync(versao, url, sha256, ct);
+                var nome = $"rustdesk-{versao}.exe";
+                var instalador = await _baixador.BaixarAsync(nome, url, sha256, ct);
                 await RustDesk.InstalarAsync(instalador, versao, ct);
                 Log.Information("RustDesk {Versao} instalado", versao);
-                LimparInstaladores(versao);
+                Baixador.Limpar("rustdesk-*", new[] { nome });
             }
 
             if (!RustDesk.ServicoRodando())
@@ -130,7 +109,7 @@ public sealed class AcessoRemoto : IDisposable
         }
     }
 
-    private async Task ConfigurarAsync(string servidor, string chavePublica, CancellationToken ct)
+    private static async Task ConfigurarAsync(string servidor, string chavePublica, CancellationToken ct)
     {
         var desejadas = new Dictionary<string, string>
         {
@@ -167,80 +146,6 @@ public sealed class AcessoRemoto : IDisposable
         Log.Information("Acesso remoto informado ao Gestão: ID {Id}, versão {Versao}", id, versao);
     }
 
-    private async Task<string> BaixarAsync(string versao, string url, string sha256, CancellationToken ct)
-    {
-        var pasta = PastaProtegida;
-        var destino = Path.Combine(pasta, $"rustdesk-{versao}.exe");
-        if (File.Exists(destino) && await HashAsync(destino, ct) == sha256) return destino;
-
-        var parcial = destino + ".parte";
-        for (var tentativa = 1; tentativa <= 5; tentativa++)
-        {
-            try
-            {
-                await BaixarParteAsync(url, parcial, ct);
-                break;
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException && !ct.IsCancellationRequested)
-            {
-                Log.Warning("Download do RustDesk interrompido (tentativa {Tentativa}): {Erro}", tentativa, ex.Message);
-                if (tentativa == 5) throw new InvalidOperationException("Não foi possível baixar o instalador do RustDesk: " + ex.Message);
-                await Task.Delay(TimeSpan.FromSeconds(10 * tentativa), ct);
-            }
-        }
-
-        var obtido = await HashAsync(parcial, ct);
-        if (obtido != sha256)
-        {
-            File.Delete(parcial);
-            throw new InvalidOperationException("O instalador baixado não confere com o SHA-256 publicado no Gestão");
-        }
-
-        File.Move(parcial, destino, true);
-        return destino;
-    }
-
-    private async Task BaixarParteAsync(string url, string parcial, CancellationToken ct)
-    {
-        var inicio = File.Exists(parcial) ? new FileInfo(parcial).Length : 0;
-        using var requisicao = new HttpRequestMessage(HttpMethod.Get, url);
-        if (inicio > 0) requisicao.Headers.Range = new RangeHeaderValue(inicio, null);
-
-        using var resposta = await _download.SendAsync(requisicao, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (resposta.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-        {
-            return;
-        }
-        resposta.EnsureSuccessStatusCode();
-
-        var continuar = inicio > 0 && resposta.StatusCode == HttpStatusCode.PartialContent;
-        await using var origem = await resposta.Content.ReadAsStreamAsync(ct);
-        await using var arquivo = new FileStream(parcial, continuar ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None);
-        await origem.CopyToAsync(arquivo, ct);
-    }
-
-    private static async Task<string> HashAsync(string caminho, CancellationToken ct)
-    {
-        await using var arquivo = new FileStream(caminho, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var bytes = await SHA256.HashDataAsync(arquivo, ct);
-        return Convert.ToHexString(bytes).ToLowerInvariant();
-    }
-
-    private static void LimparInstaladores(string versaoAtual)
-    {
-        try
-        {
-            foreach (var arquivo in Directory.EnumerateFiles(PastaProtegida, "rustdesk-*"))
-            {
-                if (Path.GetFileName(arquivo) != $"rustdesk-{versaoAtual}.exe") File.Delete(arquivo);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Debug(ex, "Falha ao limpar instaladores antigos do RustDesk");
-        }
-    }
-
     private static string GerarSenha()
     {
         Span<char> senha = stackalloc char[20];
@@ -255,12 +160,20 @@ public sealed class AcessoRemoto : IDisposable
         _ultimoMotivo = motivo;
         Log.Information("{Motivo}", motivo);
     }
+}
 
-    private static string Texto(JsonElement elemento, string nome) =>
-        elemento.TryGetProperty(nome, out var valor) && valor.ValueKind == JsonValueKind.String ? valor.GetString()?.Trim() ?? string.Empty : string.Empty;
+public static class LeituraJson
+{
+    public static string Texto(JsonElement elemento, string nome) =>
+        elemento.ValueKind == JsonValueKind.Object && elemento.TryGetProperty(nome, out var valor) && valor.ValueKind == JsonValueKind.String
+            ? valor.GetString()?.Trim() ?? string.Empty
+            : string.Empty;
 
-    private static bool Booleano(JsonElement elemento, string nome) =>
-        elemento.TryGetProperty(nome, out var valor) && valor.ValueKind == JsonValueKind.True;
+    public static bool Booleano(JsonElement elemento, string nome) =>
+        elemento.ValueKind == JsonValueKind.Object && elemento.TryGetProperty(nome, out var valor) && valor.ValueKind == JsonValueKind.True;
 
-    public void Dispose() => _download.Dispose();
+    public static int Inteiro(JsonElement elemento, string nome, int padrao) =>
+        elemento.ValueKind == JsonValueKind.Object && elemento.TryGetProperty(nome, out var valor) && valor.ValueKind == JsonValueKind.Number && valor.TryGetInt32(out var numero)
+            ? numero
+            : padrao;
 }

@@ -10,28 +10,19 @@ public sealed class ServicoKiosk : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        Log.Information("Serviço do KioskMax iniciado");
+        Log.Information("Serviço do KioskMax {Versao} iniciado", AtualizacaoKiosk.VersaoAtual);
         using var gestao = new ClienteGestaoServico();
-        using var remoto = new AcessoRemoto(gestao);
+        using var baixador = new Baixador();
+        var remoto = new AcessoRemoto(gestao, baixador);
+        var atualizacao = new AtualizacaoKiosk(gestao, baixador);
 
         try
         {
             await Task.Delay(EsperaInicial, ct);
             while (!ct.IsCancellationRequested)
             {
-                try
-                {
-                    await remoto.ExecutarAsync(ct);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Log.Error(ex, "Erro no ciclo do serviço do KioskMax");
-                }
-
+                await ExecutarAsync("acesso remoto", remoto.ExecutarAsync, ct);
+                await ExecutarAsync("atualização do KioskMax", atualizacao.ExecutarAsync, ct);
                 await Task.Delay(Intervalo, ct);
             }
         }
@@ -40,5 +31,21 @@ public sealed class ServicoKiosk : BackgroundService
         }
 
         Log.Information("Serviço do KioskMax encerrado");
+    }
+
+    private static async Task ExecutarAsync(string nome, Func<CancellationToken, Task> tarefa, CancellationToken ct)
+    {
+        try
+        {
+            await tarefa(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Erro no ciclo do serviço do KioskMax ({Tarefa})", nome);
+        }
     }
 }

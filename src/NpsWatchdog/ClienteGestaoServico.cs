@@ -38,6 +38,12 @@ public sealed class ClienteGestaoServico : IDisposable
     public Task<RespostaServico> InformarRemotoAsync(object corpo, CancellationToken ct) =>
         EnviarAsync(HttpMethod.Post, "/kiosk/dispositivo/remoto", corpo, ct);
 
+    public Task<RespostaServico> ConsultarAtualizacaoAsync(CancellationToken ct) =>
+        EnviarAsync(HttpMethod.Get, "/kiosk/dispositivo/atualizacao", null, ct);
+
+    public Task<RespostaServico> InformarAtualizacaoAsync(object corpo, CancellationToken ct) =>
+        EnviarAsync(HttpMethod.Post, "/kiosk/dispositivo/atualizacao", corpo, ct);
+
     private async Task<RespostaServico> EnviarAsync(HttpMethod metodo, string caminho, object? corpo, CancellationToken ct)
     {
         var cfg = ConfigManager.LoadConfig();
