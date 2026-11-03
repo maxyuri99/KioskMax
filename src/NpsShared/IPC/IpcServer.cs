@@ -14,6 +14,7 @@ namespace NpsShared.IPC;
 public class IpcServer : IDisposable
 {
     private const string PipeName = "NpsDisplay_IPC";
+    private static readonly TimeSpan PrazoComando = TimeSpan.FromSeconds(3);
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private readonly Func<IpcCommand, Task<IpcResponse>> _commandHandler;
     private Task? _serverTask;
@@ -110,7 +111,16 @@ public class IpcServer : IDisposable
                 return;
             }
 
-            var response = await _commandHandler(command);
+            IpcResponse response;
+            try
+            {
+                response = await _commandHandler(command).WaitAsync(PrazoComando);
+            }
+            catch (TimeoutException)
+            {
+                Log.Warning("IPC command {CommandType} did not finish in {Segundos}s (UI not responding)", command.CommandType, PrazoComando.TotalSeconds);
+                response = new IpcResponse(false, "UI not responding") { TempoEsgotado = true };
+            }
             var responseJson = JsonSerializer.Serialize(response);
 
             await writer.WriteLineAsync(responseJson);

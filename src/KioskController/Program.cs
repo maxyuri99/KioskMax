@@ -9,6 +9,8 @@ static class Program
     [STAThread]
     static void Main()
     {
+        ConfigManager.Gravador = true;
+
         // Initialize logging
         var logPath = Path.Combine(ConfigManager.GetLogDirectory(), "KioskController-.log");
         Log.Logger = new LoggerConfiguration()
@@ -55,6 +57,7 @@ static class Program
         var pid = Environment.ProcessId;
         KioskProcessTakeover.KillOtherInstancesSameExe(pid);
         if (!instancia.Primeira) instancia.Assumir();
+        SaidaSolicitada.Limpar();
         KioskProcessTakeover.KillAllWithImageName("WindowRouter");
         KioskProcessTakeover.KillAllWithImageName("KioskBrowser");
         KioskProcessTakeover.KillAllWithImageName("NpsDisplay");
@@ -70,6 +73,7 @@ static class Program
         catch (Exception ex)
         {
             Log.Fatal(ex, "Application crashed");
+            Environment.ExitCode = 1;
         }
         finally
         {

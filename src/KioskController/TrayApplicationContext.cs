@@ -746,6 +746,7 @@ public class TrayApplicationContext : ApplicationContext
 		}
 
 		Log.Information("Exit requested by user");
+		SaidaSolicitada.Marcar();
 		BeginCleanupAndExit();
 	}
 

@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using KioskTef;
 using NpsShared.Configuration;
 using NpsShared.IPC;
@@ -28,6 +29,12 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private const int MaxEventosFila = 2000;
     private static readonly int[] Recuos = { 5, 10, 20, 30 };
     private static readonly TimeSpan RetencaoComandosExecutados = TimeSpan.FromHours(6);
+    private const int LimiteRecusasToken = 3;
+    private static readonly TimeSpan JanelaRecusasToken = TimeSpan.FromMinutes(1);
+    private const int LimiteTelaSemResposta = 2;
+    private static readonly TimeSpan IntervaloMinimoReinicioTela = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan IntervaloMinimoReinicioRoteador = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan IntervaloImpressoras = TimeSpan.FromSeconds(60);
 
     private readonly CancellationTokenSource _cts = new();
     private readonly ClienteGestao _cliente = new();
@@ -47,7 +54,16 @@ public sealed class AgenteKiosk : IAsyncDisposable
     private readonly Dictionary<int, (DateTime Em, bool Sucesso, string Mensagem)> _comandosExecutados = new();
     private DateTime _impressorasEm = DateTime.MinValue;
     private IReadOnlyList<string> _impressoras = Array.Empty<string>();
+    private int _listandoImpressoras;
     private DateTime _ultimaReinicializacaoTela = DateTime.MinValue;
+    private int _recusasToken;
+    private DateTime _primeiraRecusaToken;
+    private int _telaSemResposta;
+    private int _recargasVigiaVistas;
+    private DateTime _ultimoReinicioRoteador = DateTime.MinValue;
+    private readonly Channel<(int Cd, string Nome)> _filaComandos = Channel.CreateUnbounded<(int, string)>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly HashSet<int> _comandosNaFila = new();
+    private Task? _tarefaComandos;
     private readonly LeitoraKiosk _leitora;
     private bool? _umMonitor;
 
@@ -107,6 +123,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     {
         _leitora.Iniciar();
         _tarefa = Task.Run(() => ExecutarAsync(_cts.Token));
+        _tarefaComandos = Task.Run(() => ProcessarComandosAsync(_cts.Token));
     }
 
     public void AcordarAgora()
@@ -273,6 +290,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
         }
 
         var cfg = ConfigManager.LoadConfig();
+        VigiarRoteador(cfg);
         var url = cfg.GestaoApiUrl?.Trim() ?? string.Empty;
 
         if (string.IsNullOrEmpty(url))
@@ -308,11 +326,20 @@ public sealed class AgenteKiosk : IAsyncDisposable
         if (resposta.Status == 401)
         {
             RestaurarEventos();
-            Log.Warning("Token do kiosk recusado pelo Gestão; registrando novamente");
-            EsquecerToken();
+            if (!ContarRecusaToken())
+            {
+                Log.Warning("Token do kiosk recusado pelo Gestão ({N}/{Limite}); mantendo o token", _recusasToken, LimiteRecusasToken);
+                DefinirEstado(EstadoGestao.Offline, $"Token recusado pelo Gestão ({_recusasToken}/{LimiteRecusasToken})", cfg.UltimaSituacao);
+                return ProximoRecuo();
+            }
+
+            Log.Warning("Token do kiosk recusado {Limite} vezes seguidas; registrando de novo sem apagar o token atual", LimiteRecusasToken);
             _aplicadoNaSessao = false;
-            return 1;
+            var novoRegistro = await RegistrarAsync(ct);
+            return novoRegistro >= 0 ? novoRegistro : 1;
         }
+
+        _recusasToken = 0;
 
         if (resposta.Status == 403)
         {
@@ -365,21 +392,43 @@ public sealed class AgenteKiosk : IAsyncDisposable
             await AplicarTefAsync(ConfigManager.LoadConfig());
         }
 
+        EnfileirarComandos(dados);
+
+        return intervalo;
+    }
+
+    private bool ContarRecusaToken()
+    {
+        var agora = DateTime.UtcNow;
+        if (_recusasToken == 0 || agora - _primeiraRecusaToken > JanelaRecusasToken)
+        {
+            _recusasToken = 0;
+            _primeiraRecusaToken = agora;
+        }
+
+        _recusasToken++;
+        if (_recusasToken < LimiteRecusasToken) return false;
+
+        _recusasToken = 0;
+        return true;
+    }
+
+    private void VigiarRoteador(NpsConfig cfg)
+    {
         try
         {
-            await ExecutarComandosAsync(dados, ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
+            if (!cfg.RouterEnabled || UmMonitor || !DeveExibirTela(cfg) || !Tela.EstaRodando || Tela.RoteadorRodando) return;
+            if (DateTime.UtcNow - _ultimoReinicioRoteador < IntervaloMinimoReinicioRoteador) return;
+
+            _ultimoReinicioRoteador = DateTime.UtcNow;
+            Log.Warning("O WindowRouter não está rodando; reiniciando");
+            var ok = Tela.IniciarRoteador();
+            Enfileirar(ok ? "ROTEADOR_REINICIADO" : "ERRO_ROTEADOR", ok ? "O roteador estava parado e foi reiniciado" : "O roteador estava parado e não reiniciou");
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Falha ao executar comandos do Gestão");
-            Enfileirar("ERRO_COMANDO", ex.Message);
+            Log.Warning(ex, "Falha ao conferir o WindowRouter");
         }
-
-        return intervalo;
     }
 
     private async Task<int> RegistrarAsync(CancellationToken ct)
@@ -818,6 +867,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
                 await Task.Delay(3000);
                 if (Tela.EstaRodando) return;
 
+                if (DateTime.UtcNow - _ultimaReinicializacaoTela < TimeSpan.FromSeconds(10)) return;
                 _ultimaReinicializacaoTela = DateTime.UtcNow;
                 Log.Warning("Reiniciando a tela após encerramento inesperado ({Motivo})", motivo);
                 await AbrirTelaAsync(cfg.RouterEnabled);
@@ -1013,11 +1063,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
             });
         }
 
-        if (DateTime.UtcNow - _impressorasEm > TimeSpan.FromSeconds(60))
-        {
-            try { _impressoras = ServicoTef.ListarImpressoras(); } catch (Exception ex) { Log.Warning(ex, "Falha ao listar impressoras"); }
-            _impressorasEm = DateTime.UtcNow;
-        }
+        AtualizarImpressorasEmSegundoPlano();
 
         var impressoras = new JsonArray();
         foreach (var nome in _impressoras) impressoras.Add(nome);
@@ -1051,6 +1097,29 @@ public sealed class AgenteKiosk : IAsyncDisposable
             ["impressoras"] = impressoras,
             ["eventos"] = RetirarEventos()
         };
+    }
+
+    private void AtualizarImpressorasEmSegundoPlano()
+    {
+        if (DateTime.UtcNow - _impressorasEm < IntervaloImpressoras) return;
+        if (Interlocked.Exchange(ref _listandoImpressoras, 1) == 1) return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                _impressoras = ServicoTef.ListarImpressoras();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Falha ao listar impressoras");
+            }
+            finally
+            {
+                _impressorasEm = DateTime.UtcNow;
+                Interlocked.Exchange(ref _listandoImpressoras, 0);
+            }
+        });
     }
 
     private JsonObject InformarCaixa()
@@ -1139,9 +1208,18 @@ public sealed class AgenteKiosk : IAsyncDisposable
 
         tela["exibindo"] = true;
         var resposta = await IpcClient.GetStatusAsync();
+        if (resposta.TempoEsgotado)
+        {
+            tela["semResposta"] = true;
+            AoTelaSemResposta();
+            return tela;
+        }
+
+        _telaSemResposta = 0;
         if (!resposta.Success) return tela;
 
         var d = resposta.Data;
+        AnotarRecargasVigia(d);
         d.TryGetValue("local", out var local);
         d.TryGetValue("url", out var url);
         d.TryGetValue("currentUrl", out var urlAtual);
@@ -1164,6 +1242,43 @@ public sealed class AgenteKiosk : IAsyncDisposable
         return tela;
     }
 
+    private void AoTelaSemResposta()
+    {
+        _telaSemResposta++;
+        Log.Warning("A tela do cliente não respondeu ao IPC ({N}/{Limite})", _telaSemResposta, LimiteTelaSemResposta);
+        if (_telaSemResposta < LimiteTelaSemResposta) return;
+        if (DateTime.UtcNow - _ultimaReinicializacaoTela < IntervaloMinimoReinicioTela) return;
+
+        _telaSemResposta = 0;
+        _ultimaReinicializacaoTela = DateTime.UtcNow;
+        Enfileirar("TELA_TRAVADA", "A tela do cliente não respondeu; reiniciando");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var cfg = ConfigManager.LoadConfig();
+                if (!DeveExibirTela(cfg)) return;
+                await AbrirTelaAsync(cfg.RouterEnabled);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Falha ao reiniciar a tela travada");
+            }
+        });
+    }
+
+    private void AnotarRecargasVigia(Dictionary<string, string> d)
+    {
+        if (!d.TryGetValue("recargasVigia", out var texto) || !int.TryParse(texto, out var recargas)) return;
+        if (recargas > _recargasVigiaVistas)
+        {
+            d.TryGetValue("motivoVigia", out var motivo);
+            Enfileirar("TELA_RECARREGADA", string.IsNullOrEmpty(motivo) ? "A tela foi recarregada pelo vigia" : $"Recarregada porque {motivo}");
+        }
+        _recargasVigiaVistas = recargas;
+    }
+
     private void RegistrarComandoExecutado(int cd, bool sucesso, string mensagem)
     {
         var limite = DateTime.UtcNow - RetencaoComandosExecutados;
@@ -1173,7 +1288,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
         _comandosExecutados[cd] = (DateTime.UtcNow, sucesso, mensagem);
     }
 
-    private async Task ExecutarComandosAsync(JsonElement dados, CancellationToken ct)
+    private void EnfileirarComandos(JsonElement dados)
     {
         if (!dados.TryGetProperty("comandos", out var comandos) || comandos.ValueKind != JsonValueKind.Array) return;
 
@@ -1183,50 +1298,104 @@ public sealed class AgenteKiosk : IAsyncDisposable
             var nome = LerTexto(comando, "deComando").ToUpperInvariant();
             if (cd == null || string.IsNullOrEmpty(nome)) continue;
 
-            if (_comandosExecutados.TryGetValue(cd.Value, out var anterior))
+            lock (_comandosNaFila)
             {
-                Log.Information("Comando {Comando} ({Cd}) reentregue; nao sera executado de novo", nome, cd);
-                await _cliente.ResultadoComandoAsync(cd.Value, anterior.Sucesso, anterior.Mensagem, ct);
-                continue;
+                if (!_comandosNaFila.Add(cd.Value)) continue;
             }
 
-            Enfileirar("COMANDO_RECEBIDO", $"{nome} ({cd})");
-            Log.Information("Comando recebido: {Comando} ({Cd})", nome, cd);
+            _filaComandos.Writer.TryWrite((cd.Value, nome));
+        }
+    }
 
-            bool sucesso;
-            string mensagem;
-            try
+    private async Task ProcessarComandosAsync(CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var (cd, nome) in _filaComandos.Reader.ReadAllAsync(ct))
             {
-                (sucesso, mensagem) = await ExecutarComandoAsync(nome);
+                try
+                {
+                    if (await ProcessarComandoAsync(cd, nome, ct)) return;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Falha ao executar o comando {Comando} ({Cd})", nome, cd);
+                    Enfileirar("ERRO_COMANDO", $"{nome}: {ex.Message}");
+                }
+                finally
+                {
+                    lock (_comandosNaFila)
+                    {
+                        _comandosNaFila.Remove(cd);
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Falha ao executar o comando {Comando}", nome);
-                sucesso = false;
-                mensagem = ex.Message;
-            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+    }
 
-            if (!sucesso) Enfileirar("ERRO_COMANDO", $"{nome}: {mensagem}");
+    private async Task<bool> ProcessarComandoAsync(int cd, string nome, CancellationToken ct)
+    {
+        if (_comandosExecutados.TryGetValue(cd, out var anterior))
+        {
+            Log.Information("Comando {Comando} ({Cd}) reentregue; nao sera executado de novo", nome, cd);
+            await EnviarResultadoAsync(cd, anterior.Sucesso, anterior.Mensagem, ct);
+            return false;
+        }
 
-            RegistrarComandoExecutado(cd.Value, sucesso, mensagem);
+        Enfileirar("COMANDO_RECEBIDO", $"{nome} ({cd})");
+        Log.Information("Comando recebido: {Comando} ({Cd})", nome, cd);
 
-            var resultado = await _cliente.ResultadoComandoAsync(cd.Value, sucesso, mensagem, ct);
-            if (resultado.PrecisaRecuar)
-            {
-                await Task.Delay(1000, ct);
-                resultado = await _cliente.ResultadoComandoAsync(cd.Value, sucesso, mensagem, ct);
-            }
+        bool sucesso;
+        string mensagem;
+        await _travaAplicacao.WaitAsync(ct);
+        try
+        {
+            (sucesso, mensagem) = await ExecutarComandoAsync(nome);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Falha ao executar o comando {Comando}", nome);
+            sucesso = false;
+            mensagem = ex.Message;
+        }
+        finally
+        {
+            _travaAplicacao.Release();
+        }
 
-            if (!resultado.Sucesso)
-            {
-                Log.Warning("Resultado do comando {Cd} não aceito: {Status} {Erro}", cd, resultado.Status, resultado.Erro);
-            }
+        if (!sucesso) Enfileirar("ERRO_COMANDO", $"{nome}: {mensagem}");
 
-            if (nome == "REINICIAR_AGENTE" && sucesso)
-            {
-                ReiniciarSolicitado?.Invoke();
-                return;
-            }
+        RegistrarComandoExecutado(cd, sucesso, mensagem);
+        await EnviarResultadoAsync(cd, sucesso, mensagem, ct);
+
+        if (nome == "REINICIAR_AGENTE" && sucesso)
+        {
+            ReiniciarSolicitado?.Invoke();
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task EnviarResultadoAsync(int cd, bool sucesso, string mensagem, CancellationToken ct)
+    {
+        var resultado = await _cliente.ResultadoComandoAsync(cd, sucesso, mensagem, ct);
+        if (resultado.PrecisaRecuar)
+        {
+            await Task.Delay(1000, ct);
+            resultado = await _cliente.ResultadoComandoAsync(cd, sucesso, mensagem, ct);
+        }
+
+        if (!resultado.Sucesso)
+        {
+            Log.Warning("Resultado do comando {Cd} não aceito: {Status} {Erro}; o Gestão reentrega e o resultado é reenviado", cd, resultado.Status, resultado.Erro);
         }
     }
 
@@ -1296,6 +1465,7 @@ public sealed class AgenteKiosk : IAsyncDisposable
     {
         try { _cts.Cancel(); } catch { }
         try { if (_tarefa != null) await Task.WhenAny(_tarefa, Task.Delay(2000)); } catch { }
+        try { if (_tarefaComandos != null) await Task.WhenAny(_tarefaComandos, Task.Delay(2000)); } catch { }
         try { await Tef.PararAsync(); } catch { }
         try { await Tef.DisposeAsync(); } catch { }
         try { await _leitora.DisposeAsync(); } catch { }

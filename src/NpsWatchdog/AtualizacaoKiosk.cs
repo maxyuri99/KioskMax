@@ -38,6 +38,7 @@ public sealed class AtualizacaoKiosk
     }
 
     private static string ArquivoEstado => Path.Combine(Baixador.PastaProtegida, "atualizacao.json");
+    public static bool EmAndamento => File.Exists(ArquivoEstado);
     private static string ArquivoRecusas => Path.Combine(Baixador.PastaProtegida, "recusadas.json");
     private static string NomeInstalador(string versao) => $"kioskmax-{versao}.exe";
     private static string ExecutavelAgente => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Controller", "KioskController.exe"));

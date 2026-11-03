@@ -28,8 +28,20 @@ public partial class MainForm : Form
     private string _telaLocalAtual = string.Empty;
     private System.Windows.Forms.Timer? _timerNovaTentativa;
     private int _tentativasFalhas;
+    private bool _semConexao;
+    private DateTime _navegacaoIniciadaEm = DateTime.UtcNow;
+    private DateTime _paginaEm = DateTime.MinValue;
+    private DateTime _ultimaRecargaVigia = DateTime.MinValue;
+    private int _recargasVigia;
+    private string _motivoVigia = string.Empty;
+    private System.Windows.Forms.Timer? _timerInicializacao;
+    private int _falhasInicializacao;
 
-    private static readonly int[] EsperaNovaTentativaSegundos = { 5, 10, 20, 30 };
+    private static readonly int[] EsperaNovaTentativaSegundos = { 5, 10, 20, 30, 60 };
+    private static readonly TimeSpan LimiteCarregamento = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan LimitePaginaParada = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan IntervaloMinimoRecargaVigia = TimeSpan.FromMinutes(2);
+    private static readonly HttpClient Sonda = new() { Timeout = TimeSpan.FromSeconds(8) };
 
     private static readonly JsonSerializerOptions JsonCamelCase = new()
     {
@@ -158,9 +170,13 @@ public partial class MainForm : Form
             {
                 _carregada = false;
                 _paginaJson = string.Empty;
+                _paginaEm = DateTime.MinValue;
+                _navegacaoIniciadaEm = DateTime.UtcNow;
             };
             _webView.CoreWebView2.NavigationCompleted += (s, e) =>
             {
+                if (_semConexao) return;
+
                 var paginaDeErro = _webView.CoreWebView2?.Source?.StartsWith("chrome-error:", StringComparison.OrdinalIgnoreCase) == true;
                 _carregada = e.IsSuccess && !paginaDeErro;
                 if (_carregada)
@@ -190,13 +206,33 @@ public partial class MainForm : Form
                 Log.Information("WebView2 initialized and navigated to: {Url}", _config.NpsUrl);
             }
             _isInitialized = true;
+            _falhasInicializacao = 0;
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Failed to initialize WebView2");
-            MessageBox.Show($"Failed to initialize browser: {ex.Message}", "Error", 
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            AgendarNovaInicializacao(ex);
         }
+    }
+
+    private void AgendarNovaInicializacao(Exception ex)
+    {
+        var espera = EsperaNovaTentativaSegundos[Math.Min(_falhasInicializacao, EsperaNovaTentativaSegundos.Length - 1)];
+        _falhasInicializacao++;
+        Log.Error(ex, "Failed to initialize WebView2; nova tentativa em {Segundos}s (tentativa {N})", espera, _falhasInicializacao);
+
+        if (IsDisposed) return;
+        _timerInicializacao ??= new System.Windows.Forms.Timer();
+        _timerInicializacao.Stop();
+        _timerInicializacao.Tick -= TimerInicializacao_Tick;
+        _timerInicializacao.Tick += TimerInicializacao_Tick;
+        _timerInicializacao.Interval = espera * 1000;
+        _timerInicializacao.Start();
+    }
+
+    private void TimerInicializacao_Tick(object? sender, EventArgs e)
+    {
+        _timerInicializacao?.Stop();
+        RecreateWebViewAndNavigate();
     }
 
     private const string ArgumentosNavegadorEconomicos = "--renderer-process-limit=1";
@@ -215,6 +251,8 @@ public partial class MainForm : Form
         var espera = EsperaNovaTentativaSegundos[indice];
         _tentativasFalhas++;
 
+        MostrarSemConexao(espera);
+
         _timerNovaTentativa ??= new System.Windows.Forms.Timer();
         _timerNovaTentativa.Stop();
         _timerNovaTentativa.Tick -= TimerNovaTentativa_Tick;
@@ -224,17 +262,38 @@ public partial class MainForm : Form
         Log.Information("Tela do cliente nao carregou; nova tentativa em {Segundos}s (tentativa {N})", espera, _tentativasFalhas);
     }
 
-    private void TimerNovaTentativa_Tick(object? sender, EventArgs e)
+    private void MostrarSemConexao(int segundos)
+    {
+        var core = _webView.CoreWebView2;
+        if (core == null) return;
+
+        var nome = !string.IsNullOrWhiteSpace(_config.KioskContexto?.NmKiosk) ? _config.KioskContexto!.NmKiosk : Environment.MachineName;
+        _semConexao = true;
+        _carregada = false;
+        core.NavigateToString(PaginasLocais.Renderizar(PaginasLocais.SemConexao, nome, _config.KioskIdentificador,
+            $"Nova tentativa em {segundos} segundos"));
+    }
+
+    private async void TimerNovaTentativa_Tick(object? sender, EventArgs e)
     {
         _timerNovaTentativa?.Stop();
 
         try
         {
-            var core = _webView.CoreWebView2;
-            if (core == null || _carregada || _telaLocalAtual.Length > 0 || string.IsNullOrWhiteSpace(_config.NpsUrl))
+            var url = _config.NpsUrl;
+            if (_webView.CoreWebView2 == null || _telaLocalAtual.Length > 0 || string.IsNullOrWhiteSpace(url))
                 return;
 
-            core.Navigate(_config.NpsUrl);
+            if (!await ServidorRespondeAsync(url))
+            {
+                AgendarNovaTentativa();
+                return;
+            }
+
+            var core = _webView.CoreWebView2;
+            if (core == null || _telaLocalAtual.Length > 0 || !_semConexao) return;
+            _semConexao = false;
+            core.Navigate(url);
         }
         catch (Exception ex)
         {
@@ -243,10 +302,50 @@ public partial class MainForm : Form
         }
     }
 
+    private static async Task<bool> ServidorRespondeAsync(string url)
+    {
+        try
+        {
+            using var resposta = await Sonda.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            return (int)resposta.StatusCode < 500;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Servidor da tela ainda sem resposta: {Mensagem}", ex.Message);
+            return false;
+        }
+    }
+
     private void PararNovaTentativa()
     {
         _tentativasFalhas = 0;
+        _semConexao = false;
         _timerNovaTentativa?.Stop();
+    }
+
+    private void VigiarPagina()
+    {
+        var core = _webView.CoreWebView2;
+        if (!_isInitialized || core == null || _telaLocalAtual.Length > 0 || _semConexao || _timerNovaTentativa?.Enabled == true
+            || string.IsNullOrWhiteSpace(_config.NpsUrl))
+            return;
+
+        var agora = DateTime.UtcNow;
+        if (agora - _ultimaRecargaVigia < IntervaloMinimoRecargaVigia) return;
+
+        string motivo;
+        if (!_carregada && agora - _navegacaoIniciadaEm > LimiteCarregamento)
+            motivo = $"a página não carregou em {LimiteCarregamento.TotalSeconds:0}s";
+        else if (_carregada && _paginaEm != DateTime.MinValue && agora - _paginaEm > LimitePaginaParada)
+            motivo = $"a página parou de enviar o estado há {(agora - _paginaEm).TotalSeconds:0}s";
+        else
+            return;
+
+        _ultimaRecargaVigia = agora;
+        _recargasVigia++;
+        _motivoVigia = motivo;
+        Log.Warning("Vigia da tela: recarregando porque {Motivo}", motivo);
+        core.Navigate(_config.NpsUrl);
     }
 
     private async Task RegisterKioskScriptAsync()
@@ -293,6 +392,7 @@ public partial class MainForm : Form
             node.Remove("tipo");
             node["em"] = DateTimeOffset.Now.ToString("o");
             _paginaJson = node.ToJsonString();
+            _paginaEm = DateTime.UtcNow;
         }
         catch (Exception ex)
         {
@@ -374,6 +474,8 @@ public partial class MainForm : Form
                 Log.Error("WebView2 crashed, attempting to reinitialize");
                 InitializeWebView();
             }
+
+            VigiarPagina();
         }
         catch (Exception ex)
         {
@@ -389,25 +491,25 @@ public partial class MainForm : Form
 
             return command.CommandType switch
             {
-                IpcCommandType.Ping => new IpcResponse(true, "Pong"),
+                IpcCommandType.Ping => await NaInterfaceAsync(() => new IpcResponse(true, "Pong")),
 
                 IpcCommandType.Reload => await HandleReloadCommand(),
 
                 IpcCommandType.SetUrl => await HandleSetUrlCommand(command),
 
-                IpcCommandType.SetMonitor => HandleSetMonitorCommand(command),
+                IpcCommandType.SetMonitor => await HandleSetMonitorCommand(command),
 
-                IpcCommandType.ToggleTopMost => HandleToggleTopMostCommand(),
+                IpcCommandType.ToggleTopMost => await HandleToggleTopMostCommand(),
 
-                IpcCommandType.Shutdown => HandleShutdownCommand(),
+                IpcCommandType.Shutdown => await HandleShutdownCommand(),
 
-                IpcCommandType.GetStatus => HandleGetStatusCommand(),
+                IpcCommandType.GetStatus => await HandleGetStatusCommand(),
 
                 IpcCommandType.SetKioskContext => await HandleSetKioskContextCommand(command),
 
-                IpcCommandType.NavigateLocal => HandleNavigateLocalCommand(command),
+                IpcCommandType.NavigateLocal => await HandleNavigateLocalCommand(command),
 
-                IpcCommandType.PostToPage => HandlePostToPageCommand(command),
+                IpcCommandType.PostToPage => await HandlePostToPageCommand(command),
 
                 _ => new IpcResponse(false, "Unknown command")
             };
@@ -419,29 +521,52 @@ public partial class MainForm : Form
         }
     }
 
-    private Task<IpcResponse> HandleReloadCommand()
+    /// <summary>
+    /// Runs the action on the UI thread without blocking the IPC thread (BeginInvoke), so a frozen UI only
+    /// makes the IPC server answer with a timeout instead of hanging the agent.
+    /// </summary>
+    private Task<T> NaInterfaceAsync<T>(Func<T> acao)
     {
-        bool hasCore = false;
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            Invoke(() =>
+            BeginInvoke(new Action(() =>
             {
-                var core = _webView.CoreWebView2;
-                hasCore = core != null;
-                if (core != null)
+                try
                 {
-                    core.Reload();
+                    tcs.TrySetResult(acao());
                 }
-            });
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }));
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new IpcResponse(false, $"Error: {ex.Message}"));
+            tcs.TrySetException(ex);
         }
+        return tcs.Task;
+    }
 
-        return Task.FromResult(hasCore
-            ? new IpcResponse(true, "Reloaded")
-            : new IpcResponse(false, "WebView2 not initialized"));
+    private Task<IpcResponse> HandleReloadCommand()
+    {
+        return NaInterfaceAsync(() =>
+        {
+            var core = _webView.CoreWebView2;
+            if (core == null) return new IpcResponse(false, "WebView2 not initialized");
+
+            if (_semConexao || (_telaLocalAtual.Length == 0 && !_carregada && !string.IsNullOrWhiteSpace(_config.NpsUrl)))
+            {
+                PararNovaTentativa();
+                core.Navigate(_config.NpsUrl);
+            }
+            else
+            {
+                core.Reload();
+            }
+            return new IpcResponse(true, "Reloaded");
+        });
     }
 
     private Task<IpcResponse> HandleSetUrlCommand(IpcCommand command)
@@ -451,73 +576,52 @@ public partial class MainForm : Form
             return Task.FromResult(new IpcResponse(false, "Missing 'url' parameter"));
         }
 
-        bool hasCore = false;
-        try
+        return NaInterfaceAsync(() =>
         {
-            Invoke(() =>
-            {
-                var core = _webView.CoreWebView2;
-                hasCore = core != null;
-                if (core != null)
-                {
-                    _telaLocalAtual = string.Empty;
-                    core.Navigate(url);
-                    _config.NpsUrl = url;
-                    _config.TelaLocal = string.Empty;
-                    ConfigManager.Update(c =>
-                    {
-                        c.NpsUrl = url;
-                        c.TelaLocal = string.Empty;
-                    });
-                }
-            });
-        }
-        catch (Exception ex)
-        {
-            return Task.FromResult(new IpcResponse(false, $"Error: {ex.Message}"));
-        }
+            var core = _webView.CoreWebView2;
+            if (core == null) return new IpcResponse(false, "WebView2 not initialized");
 
-        return Task.FromResult(hasCore
-            ? new IpcResponse(true, $"URL changed to: {url}")
-            : new IpcResponse(false, "WebView2 not initialized"));
+            _telaLocalAtual = string.Empty;
+            _config.NpsUrl = url;
+            _config.TelaLocal = string.Empty;
+            PararNovaTentativa();
+            core.Navigate(url);
+            return new IpcResponse(true, $"URL changed to: {url}");
+        });
     }
 
-    private IpcResponse HandleSetMonitorCommand(IpcCommand command)
+    private Task<IpcResponse> HandleSetMonitorCommand(IpcCommand command)
     {
         if (!command.Parameters.TryGetValue("monitorIndex", out var indexStr) ||
             !int.TryParse(indexStr, out var monitorIndex))
         {
-            return new IpcResponse(false, "Invalid 'monitorIndex' parameter");
+            return Task.FromResult(new IpcResponse(false, "Invalid 'monitorIndex' parameter"));
         }
 
-        var screens = Screen.AllScreens;
-        if (monitorIndex < 0 || monitorIndex >= screens.Length)
+        return NaInterfaceAsync(() =>
         {
-            return new IpcResponse(false, $"Invalid monitor index. Available: 0-{screens.Length - 1}");
-        }
+            var screens = Screen.AllScreens;
+            if (monitorIndex < 0 || monitorIndex >= screens.Length)
+            {
+                return new IpcResponse(false, $"Invalid monitor index. Available: 0-{screens.Length - 1}");
+            }
 
-        Invoke(() =>
-        {
             _targetScreen = screens[monitorIndex];
             this.Bounds = _targetScreen.Bounds;
             _config.MonitorIndex = monitorIndex;
-            ConfigManager.Update(c => c.MonitorIndex = monitorIndex);
             Log.Information("Switched to monitor {Index}: {Device}", monitorIndex, _targetScreen.DeviceName);
+            return new IpcResponse(true, $"Switched to monitor {monitorIndex}");
         });
-
-        return new IpcResponse(true, $"Switched to monitor {monitorIndex}");
     }
 
-    private IpcResponse HandleToggleTopMostCommand()
+    private Task<IpcResponse> HandleToggleTopMostCommand()
     {
-        Invoke(() =>
+        return NaInterfaceAsync(() =>
         {
             this.TopMost = !this.TopMost;
             _config.TopMost = this.TopMost;
-            ConfigManager.Update(c => c.TopMost = _config.TopMost);
+            return new IpcResponse(true, $"TopMost: {this.TopMost}");
         });
-
-        return new IpcResponse(true, $"TopMost: {this.TopMost}");
     }
 
     private async Task<IpcResponse> HandleSetKioskContextCommand(IpcCommand command)
@@ -533,7 +637,7 @@ public partial class MainForm : Form
             return new IpcResponse(false, "Invalid kiosk context");
         }
 
-        var tcs = new TaskCompletionSource<IpcResponse>();
+        var tcs = new TaskCompletionSource<IpcResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         BeginInvoke(new Action(async () =>
         {
             try
@@ -561,7 +665,7 @@ public partial class MainForm : Form
         return await tcs.Task;
     }
 
-    private IpcResponse HandleNavigateLocalCommand(IpcCommand command)
+    private Task<IpcResponse> HandleNavigateLocalCommand(IpcCommand command)
     {
         command.Parameters.TryGetValue("tipo", out var tipo);
         command.Parameters.TryGetValue("html", out var html);
@@ -571,91 +675,82 @@ public partial class MainForm : Form
 
         if (string.IsNullOrWhiteSpace(html) && !PaginasLocais.EhTipoValido(tipo))
         {
-            return new IpcResponse(false, "Missing 'html' or valid 'tipo' parameter");
+            return Task.FromResult(new IpcResponse(false, "Missing 'html' or valid 'tipo' parameter"));
         }
 
-        var hasCore = false;
-        Invoke(() =>
+        return NaInterfaceAsync(() =>
         {
             var core = _webView.CoreWebView2;
-            hasCore = core != null;
-            if (core == null) return;
+            if (core == null) return new IpcResponse(false, "WebView2 not initialized");
 
             if (!string.IsNullOrWhiteSpace(html))
             {
                 _telaLocalAtual = "HTML";
+                PararNovaTentativa();
                 core.NavigateToString(html);
             }
             else
             {
                 NavigateLocalPage(tipo!, nome, identificador, mensagem);
             }
+            return new IpcResponse(true, "Local page shown");
         });
-
-        return hasCore
-            ? new IpcResponse(true, "Local page shown")
-            : new IpcResponse(false, "WebView2 not initialized");
     }
 
-    private IpcResponse HandlePostToPageCommand(IpcCommand command)
+    private Task<IpcResponse> HandlePostToPageCommand(IpcCommand command)
     {
         if (!command.Parameters.TryGetValue("json", out var json) || string.IsNullOrWhiteSpace(json))
         {
-            return new IpcResponse(false, "Missing 'json' parameter");
+            return Task.FromResult(new IpcResponse(false, "Missing 'json' parameter"));
         }
 
-        var hasCore = false;
-        Invoke(() =>
+        return NaInterfaceAsync(() =>
         {
             var core = _webView.CoreWebView2;
-            hasCore = core != null;
-            core?.PostWebMessageAsJson(json);
+            if (core == null) return new IpcResponse(false, "WebView2 not initialized");
+            core.PostWebMessageAsJson(json);
+            return new IpcResponse(true, "Posted");
         });
-
-        return hasCore
-            ? new IpcResponse(true, "Posted")
-            : new IpcResponse(false, "WebView2 not initialized");
     }
 
-    private IpcResponse HandleShutdownCommand()
+    private Task<IpcResponse> HandleShutdownCommand()
     {
-        Invoke(() =>
+        return NaInterfaceAsync(() =>
         {
             Log.Information("Shutdown requested via IPC");
-            Application.Exit();
+            BeginInvoke(new Action(Application.Exit));
+            return new IpcResponse(true, "Shutting down");
         });
-
-        return new IpcResponse(true, "Shutting down");
     }
 
-    private IpcResponse HandleGetStatusCommand()
+    private Task<IpcResponse> HandleGetStatusCommand()
     {
-        var currentUrl = string.Empty;
-        try
+        return NaInterfaceAsync(() =>
         {
-            Invoke(() => currentUrl = _webView.CoreWebView2?.Source ?? string.Empty);
-        }
-        catch { }
+            var status = new Dictionary<string, string>
+            {
+                { "url", _config.NpsUrl },
+                { "currentUrl", _semConexao ? string.Empty : _webView.CoreWebView2?.Source ?? string.Empty },
+                { "local", _semConexao ? PaginasLocais.SemConexao : _telaLocalAtual },
+                { "carregada", _carregada.ToString() },
+                { "paginaJson", _paginaJson },
+                { "monitor", _targetScreen.DeviceName },
+                { "monitorIndex", Array.IndexOf(Screen.AllScreens, _targetScreen).ToString() },
+                { "topMost", this.TopMost.ToString() },
+                { "initialized", _isInitialized.ToString() },
+                { "recargasVigia", _recargasVigia.ToString() },
+                { "motivoVigia", _motivoVigia }
+            };
 
-        var status = new Dictionary<string, string>
-        {
-            { "url", _config.NpsUrl },
-            { "currentUrl", currentUrl },
-            { "local", _telaLocalAtual },
-            { "carregada", _carregada.ToString() },
-            { "paginaJson", _paginaJson },
-            { "monitor", _targetScreen.DeviceName },
-            { "monitorIndex", Array.IndexOf(Screen.AllScreens, _targetScreen).ToString() },
-            { "topMost", this.TopMost.ToString() },
-            { "initialized", _isInitialized.ToString() }
-        };
-
-        return new IpcResponse(true, "OK", status);
+            return new IpcResponse(true, "OK", status);
+        });
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         _resilienceTimer?.Stop();
+        _timerNovaTentativa?.Stop();
+        _timerInicializacao?.Stop();
         _ipcServer?.Dispose();
         _webView?.Dispose();
         base.OnFormClosing(e);

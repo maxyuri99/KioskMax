@@ -46,5 +46,6 @@ public class Program
             .ConfigureServices((hostContext, services) =>
             {
                 services.AddHostedService<ServicoKiosk>();
+                services.AddHostedService<SupervisorAgente>();
             });
 }

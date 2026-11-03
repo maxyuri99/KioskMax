@@ -49,6 +49,7 @@ public class IpcResponse
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public Dictionary<string, string> Data { get; set; } = new();
+    public bool TempoEsgotado { get; set; }
 
     public IpcResponse()
     {

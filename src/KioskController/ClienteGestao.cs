@@ -29,7 +29,7 @@ public sealed class ClienteGestao : IDisposable
 
     public ClienteGestao()
     {
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
     }
 
     public Task<RespostaGestao> RegistrarAsync(string nmComputador, string versaoApp, CancellationToken ct = default)

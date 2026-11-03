@@ -12,26 +12,27 @@ namespace NpsShared.IPC;
 public class IpcClient
 {
     private const string PipeName = "NpsDisplay_IPC";
-    private const int TimeoutMs = 5000;
+    private static readonly TimeSpan Prazo = TimeSpan.FromSeconds(4);
 
     /// <summary>
     /// Sends a command to NpsDisplay and waits for response
     /// </summary>
     public static async Task<IpcResponse> SendCommandAsync(IpcCommand command)
     {
+        using var prazo = new CancellationTokenSource(Prazo);
         try
         {
-            using var pipeClient = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut);
-            await pipeClient.ConnectAsync(TimeoutMs);
+            using var pipeClient = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await pipeClient.ConnectAsync(prazo.Token);
 
             using var writer = new StreamWriter(pipeClient, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
             using var reader = new StreamReader(pipeClient, Encoding.UTF8, leaveOpen: true);
 
             var requestJson = JsonSerializer.Serialize(command);
-            await writer.WriteLineAsync(requestJson);
+            await writer.WriteLineAsync(requestJson.AsMemory(), prazo.Token);
             Log.Debug("IPC sent: {Request}", requestJson);
 
-            var responseJson = await reader.ReadLineAsync();
+            var responseJson = await reader.ReadLineAsync(prazo.Token);
             if (string.IsNullOrEmpty(responseJson))
             {
                 return new IpcResponse(false, "No response received");
@@ -42,10 +43,10 @@ public class IpcClient
             var response = JsonSerializer.Deserialize<IpcResponse>(responseJson);
             return response ?? new IpcResponse(false, "Invalid response format");
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && prazo.IsCancellationRequested))
         {
-            Log.Warning("IPC command timed out: {CommandType}", command.CommandType);
-            return new IpcResponse(false, "Connection timeout");
+            Log.Warning("IPC command timed out after {Segundos}s: {CommandType}", Prazo.TotalSeconds, command.CommandType);
+            return new IpcResponse(false, "Connection timeout") { TempoEsgotado = true };
         }
         catch (Exception ex)
         {

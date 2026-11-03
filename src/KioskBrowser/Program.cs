@@ -34,8 +34,7 @@ static class Program
         catch (Exception ex)
         {
             Log.Fatal(ex, "Application crashed");
-            MessageBox.Show($"Fatal error: {ex.Message}", "KioskBrowser Error", 
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Environment.ExitCode = 1;
         }
         finally
         {

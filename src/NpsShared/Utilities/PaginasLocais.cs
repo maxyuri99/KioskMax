@@ -7,6 +7,7 @@ public static class PaginasLocais
     public const string Aguardando = "AGUARDANDO";
     public const string SemTela = "SEM_TELA";
     public const string Bloqueado = "BLOQUEADO";
+    public const string SemConexao = "SEM_CONEXAO";
 
     public static bool EhTipoValido(string? tipo) =>
         tipo == Aguardando || tipo == SemTela || tipo == Bloqueado;
@@ -16,6 +17,7 @@ public static class PaginasLocais
         Aguardando => "Aprove este kiosk no Gestão",
         SemTela => "Sem tela definida para este kiosk",
         Bloqueado => "Este kiosk está bloqueado",
+        SemConexao => "Tentando conectar novamente",
         _ => ""
     };
 
@@ -24,6 +26,7 @@ public static class PaginasLocais
         Aguardando => "Aguardando aprovação",
         SemTela => "Sem tela definida",
         Bloqueado => "Kiosk bloqueado",
+        SemConexao => "Sem conexão",
         _ => ""
     };
 
