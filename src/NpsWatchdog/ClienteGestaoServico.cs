@@ -6,7 +6,7 @@ using NpsShared.Utilities;
 
 namespace NpsWatchdog;
 
-public sealed record RespostaServico(bool FalhaRede, int Status, bool Sucesso, string Mensagem, JsonElement Dados)
+public sealed record RespostaServico(bool FalhaRede, int Status, bool Sucesso, string Mensagem, JsonElement Dados, string Erro = "")
 {
     public bool TemDados => Dados.ValueKind == JsonValueKind.Object;
 }
@@ -44,6 +44,12 @@ public sealed class ClienteGestaoServico : IDisposable
     public Task<RespostaServico> InformarAtualizacaoAsync(object corpo, CancellationToken ct) =>
         EnviarAsync(HttpMethod.Post, "/kiosk/dispositivo/atualizacao", corpo, ct);
 
+    public Task<RespostaServico> ConsultarCamerasAsync(CancellationToken ct) =>
+        EnviarAsync(HttpMethod.Get, "/kiosk/dispositivo/cameras", null, ct);
+
+    public Task<RespostaServico> EnviarContagensAsync(int cdCamera, object corpo, CancellationToken ct) =>
+        EnviarAsync(HttpMethod.Post, $"/kiosk/dispositivo/cameras/{cdCamera}/contagens", corpo, ct);
+
     private async Task<RespostaServico> EnviarAsync(HttpMethod metodo, string caminho, object? corpo, CancellationToken ct)
     {
         var cfg = ConfigManager.LoadConfig();
@@ -68,8 +74,9 @@ public sealed class ClienteGestaoServico : IDisposable
                 var raiz = doc.RootElement;
                 var sucesso = raiz.TryGetProperty("sucesso", out var s) && s.ValueKind == JsonValueKind.True;
                 var mensagem = raiz.TryGetProperty("mensagem", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? string.Empty : string.Empty;
+                var erro = raiz.TryGetProperty("erro", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() ?? string.Empty : string.Empty;
                 var dados = raiz.TryGetProperty("dados", out var d) ? d.Clone() : default;
-                return new RespostaServico(false, status, sucesso && resposta.IsSuccessStatusCode, mensagem, dados);
+                return new RespostaServico(false, status, sucesso && resposta.IsSuccessStatusCode, mensagem, dados, erro);
             }
             catch (JsonException)
             {

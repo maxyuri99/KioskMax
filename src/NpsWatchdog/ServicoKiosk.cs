@@ -15,10 +15,13 @@ public sealed class ServicoKiosk : BackgroundService
         using var baixador = new Baixador();
         var remoto = new AcessoRemoto(gestao, baixador);
         var atualizacao = new AtualizacaoKiosk(gestao, baixador);
+        var cameras = new ColetorCameras(gestao);
+        Task? coleta = null;
 
         try
         {
             await Task.Delay(EsperaInicial, ct);
+            coleta = Task.Run(() => cameras.ExecutarAsync(ct), ct);
             while (!ct.IsCancellationRequested)
             {
                 await ExecutarAsync("acesso remoto", remoto.ExecutarAsync, ct);
@@ -28,6 +31,17 @@ public sealed class ServicoKiosk : BackgroundService
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+        }
+
+        if (coleta != null)
+        {
+            try
+            {
+                await coleta;
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
 
         Log.Information("Serviço do KioskMax encerrado");
