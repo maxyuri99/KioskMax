@@ -16,12 +16,15 @@ public sealed class ServicoKiosk : BackgroundService
         var remoto = new AcessoRemoto(gestao, baixador);
         var atualizacao = new AtualizacaoKiosk(gestao, baixador);
         var cameras = new ColetorCameras(gestao);
+        var precos = new GeradorPrecosLeitora(gestao);
         Task? coleta = null;
+        Task? geracao = null;
 
         try
         {
             await Task.Delay(EsperaInicial, ct);
             coleta = Task.Run(() => cameras.ExecutarAsync(ct), ct);
+            geracao = Task.Run(() => precos.ExecutarAsync(ct), ct);
             while (!ct.IsCancellationRequested)
             {
                 await ExecutarAsync("acesso remoto", remoto.ExecutarAsync, ct);
@@ -33,11 +36,12 @@ public sealed class ServicoKiosk : BackgroundService
         {
         }
 
-        if (coleta != null)
+        foreach (var tarefa in new[] { coleta, geracao })
         {
+            if (tarefa == null) continue;
             try
             {
-                await coleta;
+                await tarefa;
             }
             catch (OperationCanceledException)
             {
