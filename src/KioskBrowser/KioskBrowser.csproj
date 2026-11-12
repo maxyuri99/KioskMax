@@ -10,9 +10,9 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>KioskBrowser</AssemblyName>
     <RootNamespace>KioskBrowser</RootNamespace>
-    <Version>2.3.0</Version>
-    <FileVersion>2.3.0</FileVersion>
-    <InformationalVersion>2.3.0</InformationalVersion>
+    <Version>2.4.0</Version>
+    <FileVersion>2.4.0</FileVersion>
+    <InformationalVersion>2.4.0</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
