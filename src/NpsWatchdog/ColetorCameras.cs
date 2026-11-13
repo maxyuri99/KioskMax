@@ -129,7 +129,8 @@ public sealed class ColetorCameras
         {
             using var leitor = new LeitorCameraHikvision(camera);
             modelo = await leitor.LerModeloAsync(ct);
-            horas = await leitor.LerContagemAsync(ContagemHikvision.Dias(camera.DtDiaInicial, DateOnly.FromDateTime(agora)), agora, ct);
+            await leitor.ConferirRelogioAsync(agora, ct);
+            horas =await leitor.LerContagemAsync(ContagemHikvision.Dias(camera.DtDiaInicial, DateOnly.FromDateTime(agora)), agora, ct);
         }
         catch (FalhaCamera ex)
         {
@@ -259,6 +260,17 @@ public sealed class LeitorCameraHikvision : IDisposable
         return ContagemHikvision.LerModelo(texto);
     }
 
+    public async Task ConferirRelogioAsync(DateTime agora, CancellationToken ct)
+    {
+        using var requisicao = new HttpRequestMessage(HttpMethod.Get, _base + "/ISAPI/System/time");
+        var (status, texto) = await EnviarAsync(requisicao, ct);
+        if (status == HttpStatusCode.Unauthorized) throw new FalhaCamera("Usuário ou senha recusados pela câmera (401).");
+        if (!IsSucesso(status)) return;
+        if (ContagemHikvision.LerRelogio(texto) is not { } relogio) return;
+        if (ContagemHikvision.RelogioErrado(relogio, agora))
+            throw new FalhaCamera(ContagemHikvision.MensagemRelogio(relogio, agora));
+    }
+
     public async Task<IReadOnlyList<HoraContagem>> LerContagemAsync(IEnumerable<DateOnly> dias, DateTime agora, CancellationToken ct)
     {
         var horas = new SortedDictionary<DateTime, HoraContagem>();
@@ -326,6 +338,7 @@ public sealed class LeitorCameraHikvision : IDisposable
 public static class ContagemHikvision
 {
     private const string FormatoHora = "yyyy-MM-dd'T'HH':00:00'";
+    private static readonly TimeSpan DiferencaMaximaRelogio = TimeSpan.FromMinutes(10);
 
     public static string EnderecoBase(string deEndereco)
     {
@@ -382,6 +395,29 @@ public static class ContagemHikvision
             return string.Empty;
         }
     }
+
+    public static DateTime? LerRelogio(string xml)
+    {
+        try
+        {
+            var raiz = XDocument.Parse(xml).Root;
+            var texto = raiz?.Elements().FirstOrDefault(e => e.Name.LocalName == "localTime")?.Value.Trim() ?? string.Empty;
+            if (texto.Length < 19) return null;
+            return DateTime.TryParseExact(texto[..19], "yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var valor)
+                ? valor
+                : null;
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+    }
+
+    public static bool RelogioErrado(DateTime relogio, DateTime agora) => (relogio - agora).Duration() > DiferencaMaximaRelogio;
+
+    public static string MensagemRelogio(DateTime relogio, DateTime agora) =>
+        $"O relógio da câmera marca {relogio:dd/MM HH:mm}, mas aqui são {agora:dd/MM HH:mm}. " +
+        "Acerte o fuso horário da câmera (Brasília, UTC-3) e a hora; enquanto isso a contagem não é enviada para não gravar horários errados.";
 
     public static List<HoraContagem> LerHoras(string xml, DateTime agora)
     {
