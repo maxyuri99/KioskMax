@@ -29,7 +29,7 @@ public partial class ControllerForm
         var btnSalvarUrl = NovoBotao("Salvar");
         btnSalvarUrl.Click += BtnSalvarGestaoUrl_Click;
         Campo(grade, "Endereço do Gestão:", _txtGestaoUrl, btnSalvarUrl,
-            "Endereço da API do Gestão que controla este kiosk (ex.: https://gestaov2.upmais.com.br/api). " +
+            "Endereço da API do Gestão que controla este kiosk (ex.: https://gestao.upmais.com.br/api). " +
             "Em branco, o kiosk funciona sozinho, só com o que está configurado neste computador (modo local).");
 
         _txtIdentificador = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, Text = _config.KioskIdentificador };

@@ -29,7 +29,7 @@ Repositório: https://github.com/maxyuri99/KioskMax
 
 Campos novos do `config.json`: `gestaoApiUrl` (vazio = modo local), `kioskIdentificador` (gerado), `kioskContexto` (último `upKiosk`), `tefAtivo` (padrão `true`), além de controle interno (`ultimaVersaoConfig`, `ultimaSituacao`, `telaLocal`, `gestaoExibir`, `tefGestao`).
 
-Instalador: `KioskMaxSetup_2.0.0.exe /GESTAOURL=https://.../api` grava `gestaoApiUrl` no `config.json` na instalação.
+Instalador: `KioskMaxSetup_2.0.0.exe /GESTAOURL=https://gestao.upmais.com.br/api` grava `gestaoApiUrl` no `config.json` na instalação. O endereço do Gestão é `https://gestao.upmais.com.br/api`; os kiosks já instalados com `https://gestaov2.upmais.com.br/api` ou com o domínio interno do Easypanel continuam funcionando sem mudança. Trocar o endereço em "Vínculo com o Gestão..." apaga o token e registra o kiosk de novo; se o Gestão recusar (identificador já registrado), redefina o vínculo do kiosk no Gestão.
 
 Os executáveis do Controller ficam grandes (~190 MB single-file) porque o TEF usa ASP.NET Core embutido.
 
