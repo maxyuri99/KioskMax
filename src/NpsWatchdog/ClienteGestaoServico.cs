@@ -59,6 +59,39 @@ public sealed class ClienteGestaoServico : IDisposable
     public Task<RespostaServico> InformarPrecosAsync(int codEmp, object corpo, CancellationToken ct) =>
         EnviarAsync(HttpMethod.Post, $"/kiosk/dispositivo/precos/{codEmp}/resultado", corpo, ct);
 
+    public Task<RespostaServico> ConsultarRostosAsync(CancellationToken ct) =>
+        EnviarAsync(HttpMethod.Get, "/kiosk/dispositivo/rostos", null, ct);
+
+    public Task<RespostaServico> InformarRostoAsync(int cdRosto, object corpo, CancellationToken ct) =>
+        EnviarAsync(HttpMethod.Post, $"/kiosk/dispositivo/rostos/{cdRosto}/resultado", corpo, ct);
+
+    public async Task<byte[]> BaixarFotoRostoAsync(int cdRosto, CancellationToken ct)
+    {
+        var cfg = ConfigManager.LoadConfig();
+        var token = KioskToken.Ler();
+        var baseUrl = (cfg.GestaoApiUrl ?? string.Empty).Trim().TrimEnd('/');
+        if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(token)) return Array.Empty<byte>();
+
+        try
+        {
+            using var requisicao = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/kiosk/dispositivo/rostos/{cdRosto}/foto");
+            requisicao.Headers.Add("X-Kiosk-Identificador", cfg.KioskIdentificador);
+            requisicao.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var resposta = await _http.SendAsync(requisicao, ct);
+            if (!resposta.IsSuccessStatusCode || resposta.Content.Headers.ContentType?.MediaType != "image/jpeg")
+                return Array.Empty<byte>();
+            return await resposta.Content.ReadAsByteArrayAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return Array.Empty<byte>();
+        }
+    }
+
     public async Task<ListaPrecos> BaixarListaPrecosAsync(string etag, CancellationToken ct)
     {
         var cfg = ConfigManager.LoadConfig();

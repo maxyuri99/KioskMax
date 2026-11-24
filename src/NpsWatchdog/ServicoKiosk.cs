@@ -17,14 +17,17 @@ public sealed class ServicoKiosk : BackgroundService
         var atualizacao = new AtualizacaoKiosk(gestao, baixador);
         var cameras = new ColetorCameras(gestao);
         var precos = new GeradorPrecosLeitora(gestao);
+        var rostos = new ExecutorRostos(gestao);
         Task? coleta = null;
         Task? geracao = null;
+        Task? cadastroRostos = null;
 
         try
         {
             await Task.Delay(EsperaInicial, ct);
             coleta = Task.Run(() => cameras.ExecutarAsync(ct), ct);
             geracao = Task.Run(() => precos.ExecutarAsync(ct), ct);
+            cadastroRostos = Task.Run(() => rostos.ExecutarAsync(ct), ct);
             while (!ct.IsCancellationRequested)
             {
                 await ExecutarAsync("acesso remoto", remoto.ExecutarAsync, ct);
@@ -36,7 +39,7 @@ public sealed class ServicoKiosk : BackgroundService
         {
         }
 
-        foreach (var tarefa in new[] { coleta, geracao })
+        foreach (var tarefa in new[] { coleta, geracao, cadastroRostos })
         {
             if (tarefa == null) continue;
             try
