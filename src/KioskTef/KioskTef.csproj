@@ -7,9 +7,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>KioskTef</RootNamespace>
     <NoWarn>$(NoWarn);CA1416;CS0414</NoWarn>
-    <Version>2.4.1</Version>
-    <FileVersion>2.4.1</FileVersion>
-    <InformationalVersion>2.4.1</InformationalVersion>
+    <Version>2.4.2</Version>
+    <FileVersion>2.4.2</FileVersion>
+    <InformationalVersion>2.4.2</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

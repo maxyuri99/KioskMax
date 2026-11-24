@@ -3,9 +3,9 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
-    <Version>2.4.1</Version>
-    <FileVersion>2.4.1</FileVersion>
-    <InformationalVersion>2.4.1</InformationalVersion>
+    <Version>2.4.2</Version>
+    <FileVersion>2.4.2</FileVersion>
+    <InformationalVersion>2.4.2</InformationalVersion>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
