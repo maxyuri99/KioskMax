@@ -17,6 +17,7 @@ public sealed class CameraContagem
     public string NmUsuario { get; init; } = string.Empty;
     public string Senha { get; init; } = string.Empty;
     public DateOnly? DtDiaInicial { get; init; }
+    public DateTime? DtHoraInicial { get; init; }
 
     public override string ToString() => $"{CdCamera} ({NmCamera})";
 }
@@ -37,6 +38,7 @@ public sealed class ColetorCameras
     private static readonly TimeSpan EsperaSemVinculo = TimeSpan.FromMinutes(1);
 
     private readonly ClienteGestaoServico _gestao;
+    private readonly SobrasCameras _sobras = SobrasCameras.NaPastaDoServico();
     private readonly Dictionary<int, string> _ultimoErroCamera = new();
     private int _intervaloSegundos = IntervaloPadrao;
     private string _ultimoMotivo = string.Empty;
@@ -129,8 +131,12 @@ public sealed class ColetorCameras
         {
             using var leitor = new LeitorCameraHikvision(camera);
             modelo = await leitor.LerModeloAsync(ct);
-            await leitor.ConferirRelogioAsync(agora, ct);
-            horas =await leitor.LerContagemAsync(ContagemHikvision.Dias(camera.DtDiaInicial, DateOnly.FromDateTime(agora)), agora, ct);
+            var relogio = await leitor.LerRelogioAsync(ct);
+            if (relogio is { } marcado && ContagemHikvision.RelogioErrado(marcado, agora))
+                horas = await RecuperarRelogioAsync(leitor, camera, marcado, agora, ct);
+            else
+                horas = _sobras.Descontar(camera.CdCamera,
+                    await leitor.LerContagemAsync(ContagemHikvision.Dias(camera.DtDiaInicial, DateOnly.FromDateTime(agora)), agora, ct), agora);
         }
         catch (FalhaCamera ex)
         {
@@ -175,6 +181,41 @@ public sealed class ColetorCameras
         Log.Debug("Contagem da câmera {Camera} enviada: {Horas} hora(s)", camera.ToString(), horas.Count);
     }
 
+    private async Task<IReadOnlyList<HoraContagem>> RecuperarRelogioAsync(LeitorCameraHikvision leitor, CameraContagem camera,
+        DateTime relogio, DateTime agora, CancellationToken ct)
+    {
+        IReadOnlyList<HoraContagem> horas = Array.Empty<HoraContagem>();
+        IReadOnlyList<HoraContagem> marcadas = Array.Empty<HoraContagem>();
+        var deslocamento = ContagemHikvision.DeslocamentoEmHoras(relogio, agora);
+        if (deslocamento is { } horasDeDiferenca)
+        {
+            var inicial = camera.DtHoraInicial ?? agora.Date;
+            var dias = ContagemHikvision.Dias(DateOnly.FromDateTime(inicial.AddHours(horasDeDiferenca)), DateOnly.FromDateTime(relogio));
+            marcadas = await leitor.LerContagemAsync(dias, relogio, ct);
+            horas = ContagemHikvision.Deslocar(marcadas, horasDeDiferenca, inicial, agora);
+        }
+
+        Log.Warning("Câmera {Camera}: relógio marca {Relogio:dd/MM HH:mm}, aqui são {Agora:dd/MM HH:mm}; acertando o fuso e a hora",
+            camera.ToString(), relogio, agora);
+        try
+        {
+            await leitor.AcertarRelogioAsync(agora, ct);
+        }
+        catch (FalhaCamera ex) when (deslocamento is not null)
+        {
+            Log.Warning("Câmera {Camera}: {Erro} A contagem segue sendo enviada com as horas corrigidas ({Horas} h).",
+                camera.ToString(), ex.Message, deslocamento);
+            return horas;
+        }
+
+        if (deslocamento is > 0)
+            _sobras.Guardar(camera.CdCamera, ContagemHikvision.Sobra(marcadas, agora, relogio), agora);
+
+        Log.Information("Câmera {Camera}: relógio acertado; {Horas} hora(s) recuperadas do período com o relógio errado",
+            camera.ToString(), horas.Count);
+        return horas;
+    }
+
     private static List<CameraContagem> LerCameras(JsonElement dados)
     {
         var cameras = new List<CameraContagem>();
@@ -193,7 +234,8 @@ public sealed class ColetorCameras
                 NuCanal = Math.Max(1, LeituraJson.Inteiro(item, "nuCanal", 1)),
                 NmUsuario = LeituraJson.Texto(item, "nmUsuario"),
                 Senha = item.TryGetProperty("senha", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() ?? string.Empty : string.Empty,
-                DtDiaInicial = ContagemHikvision.LerDia(LeituraJson.Texto(item, "dtHoraInicial"))
+                DtDiaInicial = ContagemHikvision.LerDia(LeituraJson.Texto(item, "dtHoraInicial")),
+                DtHoraInicial = ContagemHikvision.LerHora(LeituraJson.Texto(item, "dtHoraInicial"))
             });
         }
 
@@ -260,15 +302,45 @@ public sealed class LeitorCameraHikvision : IDisposable
         return ContagemHikvision.LerModelo(texto);
     }
 
-    public async Task ConferirRelogioAsync(DateTime agora, CancellationToken ct)
+    private async Task<string?> LerXmlRelogioAsync(CancellationToken ct)
     {
         using var requisicao = new HttpRequestMessage(HttpMethod.Get, _base + "/ISAPI/System/time");
         var (status, texto) = await EnviarAsync(requisicao, ct);
         if (status == HttpStatusCode.Unauthorized) throw new FalhaCamera("Usuário ou senha recusados pela câmera (401).");
-        if (!IsSucesso(status)) return;
-        if (ContagemHikvision.LerRelogio(texto) is not { } relogio) return;
-        if (ContagemHikvision.RelogioErrado(relogio, agora))
-            throw new FalhaCamera(ContagemHikvision.MensagemRelogio(relogio, agora));
+        return IsSucesso(status) ? texto : null;
+    }
+
+    public async Task<DateTime?> LerRelogioAsync(CancellationToken ct)
+    {
+        var xml = await LerXmlRelogioAsync(ct);
+        return xml is null ? null : ContagemHikvision.LerRelogio(xml);
+    }
+
+    public async Task AcertarRelogioAsync(DateTime agora, CancellationToken ct)
+    {
+        var atual = await LerXmlRelogioAsync(ct)
+            ?? throw new FalhaCamera(ContagemHikvision.MensagemAcertoRecusado(null, agora));
+
+        await GravarRelogioAsync(ContagemHikvision.XmlComFuso(atual, agora, manual: false), ct);
+        var relogio = await LerRelogioAsync(ct);
+        if (relogio is { } depoisDoFuso && !ContagemHikvision.RelogioErrado(depoisDoFuso, DateTime.Now)) return;
+
+        await GravarRelogioAsync(ContagemHikvision.XmlComFuso(atual, DateTime.Now, manual: true), ct);
+        relogio = await LerRelogioAsync(ct);
+        if (relogio is { } depoisDaHora && !ContagemHikvision.RelogioErrado(depoisDaHora, DateTime.Now)) return;
+
+        throw new FalhaCamera(ContagemHikvision.MensagemAcertoRecusado(relogio, DateTime.Now));
+    }
+
+    private async Task GravarRelogioAsync(string xml, CancellationToken ct)
+    {
+        using var requisicao = new HttpRequestMessage(HttpMethod.Put, _base + "/ISAPI/System/time")
+        {
+            Content = new StringContent(xml, Encoding.UTF8, "application/xml")
+        };
+        var (status, _) = await EnviarAsync(requisicao, ct);
+        if (status is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            throw new FalhaCamera($"A câmera está com o relógio errado e o usuário dela não tem permissão para acertar a hora ({(int)status}). Libere a configuração de hora para esse usuário ou acerte o fuso (Brasília, UTC-3) na câmera.");
     }
 
     public async Task<IReadOnlyList<HoraContagem>> LerContagemAsync(IEnumerable<DateOnly> dias, DateTime agora, CancellationToken ct)
@@ -415,9 +487,81 @@ public static class ContagemHikvision
 
     public static bool RelogioErrado(DateTime relogio, DateTime agora) => (relogio - agora).Duration() > DiferencaMaximaRelogio;
 
-    public static string MensagemRelogio(DateTime relogio, DateTime agora) =>
-        $"O relógio da câmera marca {relogio:dd/MM HH:mm}, mas aqui são {agora:dd/MM HH:mm}. " +
-        "Acerte o fuso horário da câmera (Brasília, UTC-3) e a hora; enquanto isso a contagem não é enviada para não gravar horários errados.";
+    public static string MensagemAcertoRecusado(DateTime? relogio, DateTime agora) =>
+        (relogio is { } marcado ? $"O relógio da câmera marca {marcado:dd/MM HH:mm}, mas aqui são {agora:dd/MM HH:mm}. " : "A câmera está com o relógio errado. ") +
+        "O kiosk tentou acertar o fuso (Brasília, UTC-3) e a hora e a câmera não aceitou; acerte na câmera (e no gravador, se ela estiver ligada a um). Enquanto isso a contagem não é enviada para não gravar horários errados.";
+
+    public static int? DeslocamentoEmHoras(DateTime relogio, DateTime agora)
+    {
+        var diferenca = relogio - agora;
+        var horas = (int)Math.Round(diferenca.TotalHours);
+        if (horas == 0) return null;
+        return (diferenca - TimeSpan.FromHours(horas)).Duration() <= DiferencaMaximaRelogio ? horas : null;
+    }
+
+    public static List<HoraContagem> Deslocar(IEnumerable<HoraContagem> marcadas, int horasDeDiferenca, DateTime inicial, DateTime agora)
+    {
+        var primeira = new DateTime(inicial.Year, inicial.Month, inicial.Day, inicial.Hour, 0, 0);
+        var ultima = new DateTime(agora.Year, agora.Month, agora.Day, agora.Hour, 0, 0);
+        return marcadas
+            .Select(h => h with { Hora = h.Hora.AddHours(-horasDeDiferenca) })
+            .Where(h => h.Hora >= primeira && h.Hora <= ultima)
+            .OrderBy(h => h.Hora)
+            .ToList();
+    }
+
+    public static List<HoraContagem> Sobra(IEnumerable<HoraContagem> marcadas, DateTime agora, DateTime relogio)
+    {
+        var primeira = new DateTime(agora.Year, agora.Month, agora.Day, agora.Hour, 0, 0);
+        return marcadas
+            .Where(h => h.Hora >= primeira && h.Hora <= relogio)
+            .Where(h => h.QtEntradas > 0 || h.QtSaidas > 0 || h.QtReentradas > 0)
+            .ToList();
+    }
+
+    public static string FusoHikvision(DateTime agora)
+    {
+        var deslocamento = TimeZoneInfo.Local.GetUtcOffset(agora);
+        var sinal = deslocamento <= TimeSpan.Zero ? "+" : "-";
+        var absoluto = deslocamento.Duration();
+        return $"CST{sinal}{absoluto.Hours}:{absoluto.Minutes:00}:00";
+    }
+
+    public static string XmlComFuso(string xmlAtual, DateTime agora, bool manual)
+    {
+        XDocument documento;
+        try
+        {
+            documento = XDocument.Parse(xmlAtual);
+        }
+        catch (System.Xml.XmlException)
+        {
+            throw new FalhaCamera("A câmera devolveu a configuração de hora num formato que não foi entendido.");
+        }
+
+        var raiz = documento.Root ?? throw new FalhaCamera("A câmera devolveu a configuração de hora vazia.");
+        var ns = raiz.Name.Namespace;
+        Definir(raiz, ns, "timeZone", FusoHikvision(agora));
+        if (manual)
+        {
+            Definir(raiz, ns, "timeMode", "manual");
+            Definir(raiz, ns, "localTime", agora.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture)
+                                            + agora.ToString("zzz", CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            raiz.Elements().Where(e => e.Name.LocalName == "localTime").Remove();
+        }
+
+        return documento.Declaration + documento.ToString(SaveOptions.DisableFormatting);
+    }
+
+    private static void Definir(XElement raiz, XNamespace ns, string nome, string valor)
+    {
+        var elemento = raiz.Elements().FirstOrDefault(e => e.Name.LocalName == nome);
+        if (elemento is null) raiz.Add(new XElement(ns + nome, valor));
+        else elemento.Value = valor;
+    }
 
     public static List<HoraContagem> LerHoras(string xml, DateTime agora)
     {
